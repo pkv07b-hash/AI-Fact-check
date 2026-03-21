@@ -1,36 +1,39 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# AI Fact-Checking Engine
+
+An AI-driven fact-checking engine that extracts verifiable claims from text or URLs, autonomously searches the web for evidence using DuckDuckGo, and verifies the claims utilizing Google Gemini 1.5.
+
+## Architecture & Tech Stack
+
+- **Frontend & Backend**: Next.js (App Router), React, TypeScript
+- **Styling**: Vanilla CSS (Premium, Glassmorphism Aesthetics)
+- **AI Orchestration**: LangChain, initialized heavily across pipelines.
+- **LLM**: Google Gemini (`@langchain/google-genai`)
+- **Web Search API**: DuckDuckGo (`duck-duck-scrape`)
+- **Schema Validation**: Zod
 
 ## Getting Started
 
-First, run the development server:
+1. **Install Dependencies**
+   ```bash
+   npm install
+   ```
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
+2. **Configure Environment Variables**
+   Rename or create a `.env.local` file in the root directory and add your Google Gemini API key:
+   ```env
+   GEMINI_API_KEY=your_actual_key_here
+   ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+3. **Run the Development Server**
+   ```bash
+   npm run dev
+   ```
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+4. **Open the Application**
+   Navigate to [http://localhost:3000](http://localhost:3000)
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## How It Works
 
-## Learn More
-
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+1. **Claim Extraction**: The `extractor.ts` module parses the input and uses Gemini alongside a LangChain structured output parser to strictly identify individual, verifiable claims.
+2. **Evidence Retrieval**: The `search.ts` module uses `duck-duck-scrape` to scrape search results related to each identified claim.
+3. **Verification**: The `verifier.ts` module evaluates the initial claim against the retrieved search evidence, providing a True/False/Partially True verdict, a Confidence Score, and concise reasoning.
