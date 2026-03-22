@@ -19,10 +19,19 @@ An AI-driven fact-checking engine that extracts verifiable claims from text or U
    ```
 
 2. **Configure Environment Variables**
-   Rename or create a `.env.local` file in the root directory and add your Google Gemini API key:
+   Rename or create a `.env.local` file in the root directory and add your Google Gemini API key (primary). Optionally add a Groq key so the pipeline can fall back if Gemini fails or hits limits:
    ```env
    GEMINI_API_KEY=your_actual_key_here
+   GROQ_API_KEY=your_groq_key_optional
+
+   # Optional (defaults shown):
+   # GEMINI_MODEL=gemini-2.5-flash
+   # GROQ_MODEL=openai/gpt-oss-120b
+   # PRIMARY_LLM=groq
    ```
+   Get a Groq API key at [https://console.groq.com](https://console.groq.com).
+
+   If Gemini returns **429 / quota exceeded**, set **`PRIMARY_LLM=groq`** so the app tries Groq first and skips the slow failing Gemini attempts. After extraction uses Groq, verification also prefers Groq automatically unless you set **`PRIMARY_LLM=gemini`**.
 
 3. **Run the Development Server**
    ```bash
