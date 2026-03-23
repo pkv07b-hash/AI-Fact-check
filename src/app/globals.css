@@ -87,6 +87,36 @@ h1, h2, h3, h4, h5, h6 {
 ::-webkit-scrollbar-thumb { background: var(--bg-secondary); border-radius: 4px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
 
+/* ── Global Soft Corners ────────────────────────────────────────────── */
+/* Applies rounded corners universally for a premium, modern look.     */
+
+main section,
+main section > div,
+main section > div > div,
+main section > div > div > div {
+  border-radius: 12px;
+}
+
+button {
+  border-radius: 8px !important;
+}
+
+textarea, input {
+  border-radius: 8px !important;
+  background: transparent !important;
+  color: inherit !important;
+}
+
+table {
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+a[target="_blank"] {
+  border-radius: 8px;
+}
+
+
 /* App Layout Styles */
 .main-container {
   max-width: 1000px;

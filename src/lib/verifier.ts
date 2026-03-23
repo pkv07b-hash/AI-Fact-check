@@ -25,7 +25,12 @@ export interface RelatedReference {
   url: string;
 }
 
-const REF_CATEGORIES = ["Global", "India", "Economy", "Tech", "Science", "Politics", "Health"] as const;
+const REF_CATEGORIES = ["Global", "India", "Internet", "World News", "Corporate World", "Tech", "Economy", "Science", "Politics", "Health"] as const;
+
+export interface FactCorrection {
+  falseComponent: string;
+  correctFact: string;
+}
 
 export interface AccuracyReport {
   /** Blended gauge: verdict strength + evidence depth (see server logs for details). */
@@ -34,9 +39,16 @@ export interface AccuracyReport {
   totalClaims: number;
   verifiedClaims: VerifiedClaim[];
   globalConclusion?: string;
+  followUpQuestions?: string[];
   relatedReferences?: RelatedReference[];
   verificationProvider?: ChatModelKind;
   extractionProvider?: ChatModelKind;
+  /** Indicates if this result was retrieved from the high-speed cache. */
+  cached?: boolean;
+  /** Specific false components mapped to their correct versions. */
+  factCorrections?: FactCorrection[];
+  /** A relevant YouTube search or video link for visual proof. */
+  youtubeUrl?: string;
 }
 
 function isRealEvidenceRow(r: { title: string; snippet: string; url: string }): boolean {
@@ -48,11 +60,11 @@ function isRealEvidenceRow(r: { title: string; snippet: string; url: string }): 
 function scoreClaimEvidenceReliability(evidence: ClaimEvidence): number {
   const hits = evidence.results.filter(isRealEvidenceRow);
   console.log(`    [SCORE] Evidence for claim ${evidence.claimId}: ${hits.length} real Wikipedia row(s) out of ${evidence.results.length} total`);
-  hits.forEach((h, i) => console.log(`      [${i+1}] "${h.title}" → ${h.snippet.substring(0, 80)}...`));
-  if (hits.length === 0) { console.log(`    [SCORE] → sourceReliability = 0% (no Wikipedia pages found — possible future/recent event)`); return 0; }
-  if (hits.length === 1) { console.log(`    [SCORE] → sourceReliability = 72% (1 Wikipedia page)`); return 72; }
-  if (hits.length === 2) { console.log(`    [SCORE] → sourceReliability = 88% (2 Wikipedia pages)`); return 88; }
-  console.log(`    [SCORE] → sourceReliability = 98% (3+ Wikipedia pages)`);
+  hits.forEach((h, i) => console.log(`      [${i+1}] "${h.title}" -> ${h.snippet.substring(0, 80)}...`));
+  if (hits.length === 0) { console.log(`    [SCORE] -> sourceReliability = 0% (no Wikipedia pages found)`); return 0; }
+  if (hits.length === 1) { console.log(`    [SCORE] -> sourceReliability = 72% (1 Wikipedia page)`); return 72; }
+  if (hits.length === 2) { console.log(`    [SCORE] -> sourceReliability = 88% (2 Wikipedia pages)`); return 88; }
+  console.log(`    [SCORE] -> sourceReliability = 98% (3+ Wikipedia pages)`);
   return 98;
 }
 
@@ -64,12 +76,6 @@ function computeSourceReliabilityScore(verifiedClaims: VerifiedClaim[]): number 
   return avg;
 }
 
-/**
- * Verdict points per claim, blended with source reliability.
- * FIX: If ALL claims have 0 source reliability (Wikipedia gap for future/recent events),
- * we fall back to pure verdict confidence so the score isn't crushed to 0.
- */
-/** Returns true if the claim text references a year strictly before 2021 (well-known history). */
 function isHistoricalClaim(claim: string): boolean {
   const years = [...claim.matchAll(/\b(1[5-9]\d{2}|20[0-1]\d|2020)\b/g)].map((m) => parseInt(m[0], 10));
   return years.length > 0 && years.every((y) => y < 2021);
@@ -79,27 +85,23 @@ function computeOverallTrustScore(verifiedClaims: VerifiedClaim[], claimCount: n
   if (claimCount === 0) return 0;
   let scoreSum = 0;
 
-  console.log(`\n[SCORE] ── Per-claim score breakdown ──`);
+  console.log(`\n[SCORE] Per-claim score breakdown`);
   verifiedClaims.forEach((vc) => {
     const src = scoreClaimEvidenceReliability(vc.evidence);
     let pts = 0;
     if (vc.status === "True") {
       pts = vc.confidenceScore;
-      // Historical boost: confident True verdict on a pre-2021 fact — don't penalise
-      // for a missing Wikipedia snippet. Grant a floor reliability of 80%.
       if (isHistoricalClaim(vc.claim) && vc.confidenceScore >= 75 && src === 0) {
-        console.log(`    [SCORE] Historical boost applied for claim [${vc.id}] (pre-2021 fact, confident True, no Wikipedia snippet)`);
-        // We'll use pts directly without blending with sourceAvg (handled below per-claim)
+        console.log(`    [SCORE] Historical boost applied for claim [${vc.id}]`);
       }
     } else if (vc.status === "Partially True") {
       pts = Math.round(vc.confidenceScore * 0.5);
     } else if (vc.status === "False") {
       pts = 0;
     } else {
-      // Unverifiable: partial credit when real sources exist
       if (src > 0) pts = Math.min(48, Math.round(src * 0.5));
     }
-    console.log(`  Claim [${vc.id}] status=${vc.status} confidence=${vc.confidenceScore}% srcRel=${src}% → verdictPts=${pts}`);
+    console.log(`  Claim [${vc.id}] status=${vc.status} confidence=${vc.confidenceScore}% srcRel=${src}% -> verdictPts=${pts}`);
     scoreSum += pts;
   });
 
@@ -110,17 +112,15 @@ function computeOverallTrustScore(verifiedClaims: VerifiedClaim[], claimCount: n
 
   let final: number;
   if (sourceAvg === 0) {
-    // Check if all True/high-confidence historical claims explain the missing source
     const allHistoricalTrue = verifiedClaims.every(
       (vc) => vc.status === "True" && vc.confidenceScore >= 75 && isHistoricalClaim(vc.claim)
     );
     if (allHistoricalTrue && verifiedClaims.length > 0) {
-      // Historical facts the model knows well — trust the verdict, don't penalise source gap
       final = verdictAvg;
-      console.log(`[SCORE] Historical facts (all True, pre-2021) → using pure verdictAvg=${verdictAvg}%`);
+      console.log(`[SCORE] Historical facts (all True, pre-2021) -> using pure verdictAvg=${verdictAvg}%`);
     } else {
       final = verdictAvg;
-      console.log(`[SCORE] sourceAvg=0 (Wikipedia gap) → using pure verdictAvg=${verdictAvg}% as final score`);
+      console.log(`[SCORE] sourceAvg=0 (Wikipedia gap) -> using pure verdictAvg=${verdictAvg}% as final score`);
     }
   } else {
     final = Math.min(100, Math.round(verdictAvg * 0.55 + sourceAvg * 0.45));
@@ -134,6 +134,18 @@ function normalizeReferenceUrl(url: string | undefined, question: string): strin
   if (/^https:\/\//i.test(t)) return t;
   if (/^http:\/\//i.test(t)) return `https://${t.slice(7)}`;
   return `https://duckduckgo.com/?q=${encodeURIComponent(question)}`;
+}
+
+function classifyTopic(text: string): (typeof REF_CATEGORIES)[number] {
+  const t = text.toLowerCase();
+  if (/\b(india|narendra|modi|rbi|isro|bcci|delhi|mumbai|bharat|up\b|bihar)\b/.test(t)) return "India";
+  if (/\b(corporate|company|stock|market|business|finance|inc\.|ceo|earnings|profit|startup|venture|billionaire)\b/.test(t)) return "Corporate World";
+  if (/\b(internet|social media|online|google|meta|tiktok|digital|web|cyber|app\b|software)\b/.test(t)) return "Internet";
+  if (/\b(news|breaking|report|crisis|war|summit|conflict|disaster|election)\b/.test(t)) return "World News";
+  if (/\b(economy|gdp|inflation|fed\b|interest rate|tax\b|budget|trade)\b/.test(t)) return "Economy";
+  if (/\b(tech|ai\b|hardware|robot|chip|processor|quantum)\b/.test(t)) return "Tech";
+  if (/\b(global|world|international|un\b|nato|treaty|embassy)\b/.test(t)) return "Global";
+  return "Global";
 }
 
 function normalizeCategory(c: string): (typeof REF_CATEGORIES)[number] {
@@ -153,7 +165,7 @@ export const DEFAULT_RELATED_REFERENCES: RelatedReference[] = [
     url: "https://duckduckgo.com/?q=ISRO+upcoming+missions",
   },
   {
-    question: "How is the EU AI Act being implemented in 2025–2026?",
+    question: "How is the EU AI Act being implemented in 2025-2026?",
     category: "Tech",
     url: "https://duckduckgo.com/?q=EU+AI+Act+implementation",
   },
@@ -198,16 +210,13 @@ function detectFollowUpKind(blob: string): FollowUpKind {
     return "biography";
   }
   if (
-    /world cup|olympic|championship|final\b|semifinal|knockout|league\b|tournament|ipl\b|odi\b|test match|score(d)?|defeated|winner of|won the \d{4}/.test(
-      b
-    )
+    /world cup|olympic|championship|final\b|semifinal|knockout|league\b|tournament|ipl\b|odi\b|test match|score(d)?|defeated|winner of|won the \d{4}/.test(b)
   ) {
     return "sports";
   }
   return "general";
 }
 
-/** Years in text → sports-timeline questions only (skip for gossip/bio claims). */
 function yearSpinoffReferences(blob: string): RelatedReference[] {
   if (detectFollowUpKind(blob) !== "sports") return [];
   const years = [...blob.matchAll(/\b(19[89]\d|20\d{2})\b/g)].map((m) => parseInt(m[0], 10));
@@ -244,146 +253,146 @@ function padRelatedWithTopicContext(
   const out = [...existing];
   const topic =
     originalUserInput.trim().slice(0, 160) ||
-    verifiedClaims.map((c) => c.claim).join(" · ").slice(0, 160) ||
+    verifiedClaims.map((c) => c.claim).join(" - ").slice(0, 160) ||
     "this topic";
-  const short = topic.length > 90 ? `${topic.slice(0, 87)}…` : topic;
+  const short = topic.length > 90 ? topic.slice(0, 87) + "..." : topic;
   const blob = `${originalUserInput}\n${verifiedClaims.map((c) => c.claim).join(" ")}`;
   const kind = detectFollowUpKind(blob);
   const primaryClaim = verifiedClaims[0]?.claim ?? originalUserInput;
-  const wed = marriageNames(primaryClaim);
+  const mm = marriageNames(primaryClaim);
 
   let extras: RelatedReference[] = [];
+  const cat = classifyTopic(blob);
 
-  if (kind === "biography" && wed) {
-    const { a, b } = wed;
-    const aT = a.replace(/\b\w/g, (c) => c.toUpperCase());
-    const bT = b.replace(/\b\w/g, (c) => c.toUpperCase());
+  if (kind === "biography" && mm) {
+    const aT = mm.a.replace(/\b\w/g, (c) => c.toUpperCase());
+    const bT = mm.b.replace(/\b\w/g, (c) => c.toUpperCase());
     extras = [
       {
-        question: `Who is ${aT} married to, according to Wikipedia and major news sources?`,
-        category: "India",
-        url: `https://duckduckgo.com/?q=${encodeURIComponent(`${aT} spouse wife husband`)}`,
+        question: `Wikipedia analysis and news sources for ${aT}'s current status`,
+        category: cat,
+        url: `https://duckduckgo.com/?q=${encodeURIComponent(aT + " spouse wife husband")}`,
       },
       {
-        question: `What does ${aT}'s Wikipedia "personal life" section say about their partner?`,
-        category: "India",
-        url: `https://duckduckgo.com/?q=${encodeURIComponent(`${aT} personal life Wikipedia`)}`,
+        question: `Official biographical data for ${aT}`,
+        category: cat,
+        url: `https://duckduckgo.com/?q=${encodeURIComponent(aT + " personal life Wikipedia")}`,
       },
       {
-        question: `Is ${aT} married to ${bT} — what do fact-checkers and biographies say?`,
-        category: "India",
-        url: `https://duckduckgo.com/?q=${encodeURIComponent(`${aT} ${bT} married fact check`)}`,
+        question: `Verified status: Is ${aT} married to ${bT}?`,
+        category: cat,
+        url: `https://duckduckgo.com/?q=${encodeURIComponent(aT + " " + bT + " married fact check")}`,
       },
       {
-        question: `Who is ${bT} (full name and notable relationships) in reliable sources?`,
-        category: "India",
-        url: `https://duckduckgo.com/?q=${encodeURIComponent(`${bT} Wikipedia`)}`,
+        question: `Notable background and relationship profile of ${bT}`,
+        category: cat,
+        url: `https://duckduckgo.com/?q=${encodeURIComponent(bT + " Wikipedia")}`,
       },
       {
-        question: `Have viral or false claims circulated about ${aT}'s marriage?`,
-        category: "India",
-        url: `https://duckduckgo.com/?q=${encodeURIComponent(`${aT} marriage rumor hoax`)}`,
+        question: `Recent rumors or hoaxes concerning ${aT}`,
+        category: cat,
+        url: `https://duckduckgo.com/?q=${encodeURIComponent(aT + " marriage rumor hoax")}`,
       },
       {
-        question: `What is the official or widely cited wedding date for ${aT}?`,
-        category: "India",
-        url: `https://duckduckgo.com/?q=${encodeURIComponent(`${aT} wedding date`)}`,
+        question: `Public records and wedding milestones for ${aT}`,
+        category: cat,
+        url: `https://duckduckgo.com/?q=${encodeURIComponent(aT + " wedding date")}`,
       },
       {
-        question: `Compare ${aT}'s partner in interviews vs encyclopedia sources.`,
-        category: "Global",
-        url: `https://duckduckgo.com/?q=${encodeURIComponent(`${aT} wife OR husband interview`)}`,
+        question: `Relationship timeline of ${aT} and ${bT} in news`,
+        category: cat,
+        url: `https://duckduckgo.com/?q=${encodeURIComponent(aT + " " + bT + " wedding news")}`,
       },
       {
-        question: `What other celebrities are often confused with ${bT} in misinformation?`,
-        category: "Global",
-        url: `https://duckduckgo.com/?q=${encodeURIComponent(`${bT} name confusion celebrity`)}`,
+        question: `Latest official statements on ${aT}'s status`,
+        category: cat,
+        url: `https://duckduckgo.com/?q=${encodeURIComponent(aT + " official statement news")}`,
       },
     ];
   } else if (kind === "sports") {
     extras = [
       {
-        question: `Who won the previous edition or earlier tournament in the same series as: ${short}?`,
-        category: "Global",
-        url: `https://duckduckgo.com/?q=${encodeURIComponent(`${short} previous winner edition`)}`,
+        question: `Final match report and score transparency: ${short}`,
+        category: cat,
+        url: `https://duckduckgo.com/?q=${encodeURIComponent(short + " match result score")}`,
       },
       {
-        question: `Who won two editions before — what do sources say for the same competition as: ${short}?`,
-        category: "Global",
-        url: `https://duckduckgo.com/?q=${encodeURIComponent(`${short} past winners list`)}`,
+        question: `Official roster and player impact for: ${short}`,
+        category: cat,
+        url: `https://duckduckgo.com/?q=${encodeURIComponent(short + " squad lineup")}`,
       },
       {
-        question: `Which teams or sides reached the final (or title match) for events like: ${short}?`,
-        category: "Global",
-        url: `https://duckduckgo.com/?q=${encodeURIComponent(`${short} final`)}`,
+        question: `Historical performance comparisons: ${short}`,
+        category: cat,
+        url: `https://duckduckgo.com/?q=${encodeURIComponent(short + " past records")}`,
       },
       {
-        question: `Who played in the semifinals (or equivalent knockout stage) related to: ${short}?`,
-        category: "Global",
-        url: `https://duckduckgo.com/?q=${encodeURIComponent(`${short} semifinal`)}`,
+        question: `Tournament status and official standings for: ${short}`,
+        category: cat,
+        url: `https://duckduckgo.com/?q=${encodeURIComponent(short + " tournament results")}`,
       },
       {
-        question: `Where and when was the decisive match or outcome for: ${short}?`,
-        category: "Global",
-        url: `https://duckduckgo.com/?q=${encodeURIComponent(`${short} final venue date`)}`,
+        question: `Injury news and recent team updates: ${short}`,
+        category: cat,
+        url: `https://duckduckgo.com/?q=${encodeURIComponent(short + " news updates")}`,
       },
       {
-        question: `What do official records or statistics say about: ${short}?`,
-        category: "Global",
-        url: `https://duckduckgo.com/?q=${encodeURIComponent(`${short} official results`)}`,
+        question: `Expert commentary on match outcomes: ${short}`,
+        category: cat,
+        url: `https://duckduckgo.com/?q=${encodeURIComponent(short + " expert analysis")}`,
       },
       {
-        question: `What claims about ${short} are often misreported or disputed?`,
-        category: "Global",
-        url: `https://duckduckgo.com/?q=${encodeURIComponent(`${short} fact check`)}`,
+        question: `Fact-check on specific viral claims about: ${short}`,
+        category: cat,
+        url: `https://duckduckgo.com/?q=${encodeURIComponent(short + " fact check")}`,
       },
       {
-        question: `How did major news outlets report the outcome of: ${short}?`,
-        category: "Global",
-        url: `https://duckduckgo.com/?q=${encodeURIComponent(`${short} news report`)}`,
+        question: `News reports on the outcome of: ${short}`,
+        category: cat,
+        url: `https://duckduckgo.com/?q=${encodeURIComponent(short + " news report")}`,
       },
     ];
   } else {
     extras = [
       {
-        question: `What do Wikipedia and major news sources say about: ${short}?`,
-        category: "Global",
-        url: `https://duckduckgo.com/?q=${encodeURIComponent(`${short} Wikipedia`)}`,
+        question: `Comprehensive Wikipedia analysis of ${short}`,
+        category: cat,
+        url: `https://duckduckgo.com/?q=${encodeURIComponent(short + " Wikipedia")}`,
       },
       {
-        question: `Is this statement supported by primary or official sources: ${short}?`,
-        category: "Global",
-        url: `https://duckduckgo.com/?q=${encodeURIComponent(`${short} official statement`)}`,
+        question: `Primary and official source check for ${short}`,
+        category: cat,
+        url: `https://duckduckgo.com/?q=${encodeURIComponent(short + " official statement")}`,
       },
       {
-        question: `What is the most common misinformation about: ${short}?`,
-        category: "Global",
-        url: `https://duckduckgo.com/?q=${encodeURIComponent(`${short} myth vs fact`)}`,
+        question: `Common misinformation and myths about ${short}`,
+        category: cat,
+        url: `https://duckduckgo.com/?q=${encodeURIComponent(short + " myth vs fact")}`,
       },
       {
-        question: `How do Reuters, AP, or BBC cover: ${short}?`,
-        category: "Global",
-        url: `https://duckduckgo.com/?q=${encodeURIComponent(`${short} Reuters OR AP news`)}`,
+        question: `Global news coverage (Reuters/AP/BBC) of ${short}`,
+        category: cat,
+        url: `https://duckduckgo.com/?q=${encodeURIComponent(short + " Reuters OR AP news")}`,
       },
       {
-        question: `What did experts or institutions publish on: ${short}?`,
-        category: "Global",
-        url: `https://duckduckgo.com/?q=${encodeURIComponent(`${short} expert analysis`)}`,
+        question: `Expert institutional analysis of ${short}`,
+        category: cat,
+        url: `https://duckduckgo.com/?q=${encodeURIComponent(short + " expert analysis")}`,
       },
       {
-        question: `What is the timeline of key events for: ${short}?`,
-        category: "Global",
-        url: `https://duckduckgo.com/?q=${encodeURIComponent(`${short} timeline`)}`,
+        question: `Detailed timeline of key events for ${short}`,
+        category: cat,
+        url: `https://duckduckgo.com/?q=${encodeURIComponent(short + " timeline")}`,
       },
       {
-        question: `What claims about ${short} need more context?`,
-        category: "Global",
-        url: `https://duckduckgo.com/?q=${encodeURIComponent(`${short} context explained`)}`,
+        question: `Contextual deep-dive analysis for ${short}`,
+        category: cat,
+        url: `https://duckduckgo.com/?q=${encodeURIComponent(short + " context explained")}`,
       },
       {
-        question: `Where can I cross-check: ${short} against multiple independent sources?`,
-        category: "Global",
-        url: `https://duckduckgo.com/?q=${encodeURIComponent(`${short} verify multiple sources`)}`,
+        question: `Multi-source cross-verification of ${short}`,
+        category: cat,
+        url: `https://duckduckgo.com/?q=${encodeURIComponent(short + " verify multiple sources")}`,
       },
     ];
   }
@@ -406,7 +415,7 @@ function padRelatedWithTopicContext(
   return out.slice(0, 8);
 }
 
-/** Fast topical follow-ups — no extra LLM round trip. */
+/** Fast topical follow-ups -- no extra LLM round trip. */
 function buildFastRelatedReferences(originalUserInput: string, verifiedClaims: VerifiedClaim[]): RelatedReference[] {
   const blob = `${originalUserInput}\n${verifiedClaims.map((c) => c.claim).join(" ")}`;
   const fromYears = yearSpinoffReferences(blob);
@@ -438,10 +447,18 @@ function normalizeRelatedToEight(
 async function verifyClaimsSingleLlmCall(
   model: BaseChatModel,
   claims: ExtractedClaim[],
-  evidenceList: ClaimEvidence[]
-): Promise<{ verifiedClaims: VerifiedClaim[]; globalConclusion: string }> {
-  if (claims.length === 0) return { verifiedClaims: [], globalConclusion: "" };
+  evidenceList: ClaimEvidence[],
+  mode: 'quick' | 'deep' = 'deep'
+): Promise<{
+  verifiedClaims: VerifiedClaim[];
+  globalConclusion: string;
+  relatedReferences: RelatedReference[];
+  factCorrections: FactCorrection[];
+  youtubeUrl: string;
+}> {
+  if (claims.length === 0) return { verifiedClaims: [], globalConclusion: "", relatedReferences: [], factCorrections: [], youtubeUrl: "" };
 
+  const isQuick = mode === 'quick';
   const blocks = claims.map((claim) => {
     const evidence = evidenceList.find((e) => e.claimId === claim.id)!;
     const evidenceStr = evidence.results
@@ -454,17 +471,26 @@ async function verifyClaimsSingleLlmCall(
 
   const parser = StructuredOutputParser.fromZodSchema(
     z.object({
-      globalConclusion: z.string().min(10).max(400)
-        .describe("A final 30-60 word summary assessing the overall truthfulness of the input. Explicitly state whether the content is likely AI-generated, real, or human-made based on the analyzed claims, evidence, and any manipulation signals."),
+      globalConclusion: z.string()
+        .describe("A final 5-6 line summary assessing the overall truthfulness. Make it detailed. You MUST wrap the single most important insight (6-12 words) in HTML `<u>` tags."),
+      relatedReferences: z.array(z.object({
+        question: z.string().describe("A specific, insightful follow-up or related question (statement style, no 'What/How/Why' start)."),
+        category: z.enum(REF_CATEGORIES).describe("The best category (Global, India, Internet, etc.)"),
+        url: z.string().describe("A functional DuckDuckGo search URL: https://duckduckgo.com/?q=..."),
+      })).min(6).max(10).describe("6-8 highly-specific follow-up questions tailored to the claims and evidence."),
+      factCorrections: z.array(z.object({
+        falseComponent: z.string().describe("The specific part of the claim that is incorrect"),
+        correctFact: z.string().describe("The correct version of that specific part")
+      })).optional().describe("Break down the false parts of the claim into False vs. True pairs. Leave empty if the claim is 100% True."),
+      youtubeUrl: z.string().optional().describe("A relevant YouTube search URL for visual proof."),
       verdicts: z
         .array(
           z.object({
             claimId: z.string(),
             status: z.enum(["True", "False", "Partially True", "Unverifiable"]),
             confidenceScore: z.number().min(0).max(100),
-            reasoning: z.string().max(600),
-            correctedStatement: z.string().max(300).optional()
-              .describe("If status is False or Unverifiable, provide the correct factual statement (e.g. 'Virat Kohli married Anushka Sharma in December 2017, not 2010'). Leave empty if status is True."),
+            reasoning: z.string().max(isQuick ? 150 : 600),
+            correctedStatement: z.string().max(300).optional(),
           })
         )
         .min(1)
@@ -473,26 +499,19 @@ async function verifyClaimsSingleLlmCall(
   );
 
   const prompt = new PromptTemplate({
-    template: `You verify MULTIPLE claims in ONE response. For EACH claim, follow these rules IN ORDER:
+    template: `You verify ${isQuick ? 'the most critical claim' : 'MULTIPLE claims'} in ONE response.
 
-1. HISTORICAL FACTS (claim mentions a year before 2021, e.g. "India independence 1947", "WWII ended 1945"):
-   - You MAY use your own training knowledge to verify. Wikipedia evidence is supplementary.
-   - If you confidently know the fact is correct → True, confidenceScore 85–100.
-   - If you confidently know the fact is wrong → False, set correctedStatement to the real fact.
-   - Only use Unverifiable if genuinely unsure even with your training knowledge.
+COMPONENT DECOUPLING:
+If a claim contains multiple details (e.g. 'X happened in Y year at Z location') and some are false, identify them in 'factCorrections'.
 
-2. RECENT OR FUTURE FACTS (claim mentions a year 2021 or later, or no year):
-   - Use ONLY the attached Wikipedia evidence.
-   - Evidence supports claim → True.
-   - Evidence contradicts → False, set correctedStatement.
-   - Mixed → Partially True.
-   - Irrelevant/empty → Unverifiable, confidenceScore 0. Use general knowledge ONLY for correctedStatement.
+RULES FOR VERIFICATION:
+1. HISTORICAL FACTS (before 2021): Use training knowledge.
+2. RECENT FACTS (2021+): Use ONLY attached evidence.
 
-General rules:
-- Keep each reasoning under 400 characters and cite which evidence source number you used (or "own knowledge" for historical facts).
-- correctedStatement must be one concise sentence. Example: "Virat Kohli married Anushka Sharma in December 2017, not 2010."
-- Leave correctedStatement empty if status is True.
-- globalConclusion MUST be between 30 and 60 words, returning a final verdict on the entire text/media block indicating if it is AI-generated, human-made, or factual real content.
+PRACTICAL RULES:
+- globalConclusion: EXACTLY 5 to 6 lines. Wrap critical insight in <u>...</u>.
+- relatedReferences: EXACTLY 8 structured entries. Use specific categories like 'India', 'Corporate World', or 'Internet' based on the topic. Questions must be DIRECT statements (no conversational prefixes).
+- youtubeUrl: Provide a helpful youtube search or video link.
 
 {bundle}
 
@@ -502,70 +521,66 @@ General rules:
   });
 
   const chain = prompt.pipe(model).pipe(parser);
-  console.log(`[VERIFIER] Sending ${claims.length} claim(s) in one bundle to LLM...`);
-  const { verdicts, globalConclusion } = await chain.invoke({ bundle });
-  console.log(`[VERIFIER] LLM returned ${verdicts.length} verdict(s):`);
-  verdicts.forEach((v) => {
-    console.log(`  → [${v.claimId}] ${v.status} (${v.confidenceScore}%) :: ${v.reasoning.substring(0, 120)}`);
-    if (v.correctedStatement) console.log(`     CORRECTION: ${v.correctedStatement}`);
-  });
+  console.log(`[VERIFIER] 🤖 Sending ${claims.length} claim(s) in one bundle to ${model.constructor.name}...`);
+  
+  const result = await chain.invoke({ bundle });
+  const { verdicts, globalConclusion, relatedReferences, factCorrections, youtubeUrl } = result;
+  
+  console.log(`[VERIFIER] ✅ LLM returned ${verdicts.length} verdict(s) and ${relatedReferences.length} related queries.`);
 
   const byId = new Map(verdicts.map((v) => [v.claimId.trim(), v]));
-  const verifiedClaims = claims.map((claim) => {
+  const verifiedClaims: VerifiedClaim[] = claims.map((claim) => {
+    const res = byId.get(claim.id);
     const evidence = evidenceList.find((e) => e.claimId === claim.id)!;
-    const v = byId.get(claim.id);
-    if (!v) {
-      console.warn(`[VERIFIER] ⚠️ No verdict returned for claim id "${claim.id}" — marking Unverifiable`);
+    if (!res) {
       return {
         id: claim.id,
         claim: claim.claim,
         status: "Unverifiable" as VerificationStatus,
         confidenceScore: 0,
-        reasoning: "Model did not return a verdict for this claim id.",
+        reasoning: "LLM failed to provide a verdict for this specific claim ID.",
         evidence,
       };
     }
     return {
       id: claim.id,
       claim: claim.claim,
-      status: v.status as VerificationStatus,
-      confidenceScore: v.confidenceScore,
-      reasoning: v.reasoning,
-      correctedStatement: v.correctedStatement || undefined,
+      status: res.status as VerificationStatus,
+      confidenceScore: res.confidenceScore,
+      reasoning: res.reasoning,
+      correctedStatement: res.correctedStatement || undefined,
       evidence,
     };
   });
 
-  return { verifiedClaims, globalConclusion };
+  return { verifiedClaims, globalConclusion, relatedReferences, factCorrections: factCorrections || [], youtubeUrl: youtubeUrl || "" };
 }
 
 export async function verifyClaims(
   claims: ExtractedClaim[],
   evidenceList: ClaimEvidence[],
   originalUserInput: string,
-  extractionProvider?: ChatModelKind
+  extractionProvider?: ChatModelKind,
+  mode: 'quick' | 'deep' = 'deep'
 ): Promise<AccuracyReport> {
-  console.log("\n[VERIFIER] ── Batched verification (1 LLM call per provider try) ──");
-  console.log(`[VERIFIER] Claims: ${claims.length}`);
-
+  console.log(`\n[VERIFIER] -- Batched verification (${mode}) --`);
+  
   const { data: reportBody, provider: verificationProvider } = await withPrimaryLlmFallback(
     async (model) => {
-      const { verifiedClaims, globalConclusion } = await verifyClaimsSingleLlmCall(model, claims, evidenceList);
+      const result = await verifyClaimsSingleLlmCall(model, claims, evidenceList, mode);
+      
+      const sourceReliabilityScore = computeSourceReliabilityScore(result.verifiedClaims);
+      const overallTrustScore = computeOverallTrustScore(result.verifiedClaims, claims.length);
 
-      const sourceReliabilityScore = computeSourceReliabilityScore(verifiedClaims);
-      const overallTrustScore = computeOverallTrustScore(verifiedClaims, claims.length);
-
-      console.log(`[VERIFIER] Overall (blended): ${overallTrustScore}% | Source reliability: ${sourceReliabilityScore}%`);
-
-      const relatedReferences = buildFastRelatedReferences(originalUserInput, verifiedClaims);
+      // Combine LLM-generated refs with fallbacks/merging logic to ensure exactly 8
+      const finalRelated = normalizeRelatedToEight(result.relatedReferences, originalUserInput, result.verifiedClaims);
 
       return {
+        ...result,
         overallTrustScore,
         sourceReliabilityScore,
         totalClaims: claims.length,
-        verifiedClaims,
-        globalConclusion,
-        relatedReferences,
+        relatedReferences: finalRelated,
       };
     },
     resolveProviderOrder({ extractionUsed: extractionProvider })
@@ -574,5 +589,6 @@ export async function verifyClaims(
   return {
     ...reportBody,
     verificationProvider,
-  };
+    extractionProvider,
+  } as AccuracyReport;
 }

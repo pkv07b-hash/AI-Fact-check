@@ -14,7 +14,7 @@ export type ExtractionResult = {
   provider: ChatModelKind;
 };
 
-export async function extractClaims(input: string): Promise<ExtractionResult> {
+export async function extractClaims(input: string, mode: 'quick' | 'deep' = 'deep'): Promise<ExtractionResult> {
   console.log("\n[EXTRACTOR] ── Starting Claim Extraction ──");
   console.log(`[EXTRACTOR] Input text (${input.length} chars): "${input.substring(0, 200)}${input.length > 200 ? "..." : ""}"`);
 
@@ -32,9 +32,10 @@ export async function extractClaims(input: string): Promise<ExtractionResult> {
   const prompt = new PromptTemplate({
     template: `You are an expert fact-checker. Extract distinct, verifiable factual claims from the provided text.
     Only extract statements that can be objectively proven true or false using public sources.
+    If the input is a question, extract the underlying factual assertion or the primary subject whose status needs verification (e.g. "Who is the Prime Minister of India?" should be converted to a claim like "Identify the current Prime Minister of India and verify their identity").
     Do NOT extract opinions, predictions, or subjective statements.
     Preserve numbers, dates, and places. For famous people, you may normalize obvious spelling errors in names (e.g. Dipika Padukon → Deepika Padukone) so searches find the right topic.
-    Limit to a maximum of 3 core claims even if the text is long (speed and quality).
+    ${mode === 'quick' ? 'Strictly limit to a maximum of 1-2 CORE claims for a high-speed verification scan.' : 'Limit to a maximum of 3 core claims even if the text is long (speed and quality).'}
     
     Text:
     {input}
@@ -46,12 +47,12 @@ export async function extractClaims(input: string): Promise<ExtractionResult> {
   });
 
   try {
-    console.log("[EXTRACTOR] Calling LLM (Gemini with Groq fallback)...");
     const { data: response, provider } = await withPrimaryLlmFallback(async (model) => {
       const chain = prompt.pipe(model).pipe(parser);
       return chain.invoke({ input });
     });
-    const claims = (response as ExtractedClaim[]).slice(0, 3);
+    const maxClaims = mode === 'quick' ? 1 : 3;
+    const claims = (response as ExtractedClaim[]).slice(0, maxClaims);
     console.log(`[EXTRACTOR] ✓ Extracted ${claims.length} claim(s) via ${provider}:`);
     claims.forEach((c) => {
       console.log(`  [${c.id}] "${c.claim}"`);

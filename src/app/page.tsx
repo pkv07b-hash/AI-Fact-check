@@ -4,8 +4,13 @@ import React, { useState, useEffect, useRef } from 'react';
 import type { AccuracyReport } from '@/lib/verifier';
 
 type PipelineStep = 'idle' | 'extracting' | 'scanning' | 'searching' | 'verifying' | 'complete' | 'error';
-type ViewTab = 'terminal' | 'nodes' | 'registry' | 'system';
+type ViewTab = 'terminal' | 'nodes' | 'registry' | 'system' | 'profile';
 type InputMode = 'text' | 'media';
+
+interface Detection {
+  label: string;
+  box_2d: [number, number, number, number];
+}
 
 interface MediaAnalysis {
   fileName: string;
@@ -15,6 +20,7 @@ interface MediaAnalysis {
   extractedText: string;
   hasManipulationSignals: boolean;
   manipulationDetails?: string;
+  detections?: Detection[];
 }
 
 interface HistoryItem {
@@ -24,14 +30,34 @@ interface HistoryItem {
   outcome: string;
 }
 
-const CAT_COLORS: Record<string, string> = {
-  Global: 'border-primary/30 bg-primary/5 text-primary-fixed-dim',
-  India: 'border-secondary/30 bg-secondary/5 text-secondary-fixed-dim',
-  Tech: 'border-error/30 bg-error/5 text-error',
-  Economy: 'border-yellow-400/30 bg-yellow-400/5 text-yellow-400',
-  Science: 'border-green-400/30 bg-green-400/5 text-green-400',
-  Politics: 'border-orange-400/30 bg-orange-400/5 text-orange-400',
-  Health: 'border-pink-400/30 bg-pink-400/5 text-pink-400',
+// Using a unified neutral theme for all categories
+const CAT_COLORS: Record<string, string> = {}; 
+
+const SUGGESTIONS = {
+  iran: [
+    { label: 'Conflict:', text: 'Iran and Israel tensions escalate following border skirmishes' },
+    { label: 'Middle East:', text: 'UN Security Council votes on new Iran-Israel ceasefire resolution' }
+  ],
+  india: [
+    { label: 'India:', text: 'ISRO successfully launches new Mars orbital probe' },
+    { label: 'India:', text: 'RBI projects 7.2% economic growth for the upcoming fiscal year' }
+  ],
+  global: [
+    { label: 'Global:', text: 'World Bank predicts 3% global GDP growth in 2026' },
+    { label: 'Global:', text: 'WHO declares new guidelines for pandemic preparedness' }
+  ],
+  it: [
+    { label: 'Tech:', text: 'AI coding tools shown to increase developer productivity by 50%' },
+    { label: 'Tech:', text: 'Major IT hubs see 20% surge in tech job openings this quarter' }
+  ],
+  digital: [
+    { label: 'Market:', text: 'Digital markets act forces tech giants to open their ecosystems' },
+    { label: 'Finance:', text: 'Cryptocurrency regulations tighten across major European markets' }
+  ],
+  ipl: [
+    { label: 'Sports:', text: 'CSK secures dramatic victory in the IPL season finale' },
+    { label: 'Web:', text: 'Global internet outage affects millions of users for 4 hours' }
+  ]
 };
 
 export default function Home() {
@@ -45,7 +71,90 @@ export default function Home() {
   const [inputMode, setInputMode] = useState<InputMode>('text');
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [filePreview, setFilePreview] = useState<string | null>(null);
+  const [themeMode, setThemeMode] = useState<'Dark' | 'Light'>('Dark');
+  const [seed, setSeed] = useState<number>(0);
+  const [pipelineProgress, setPipelineProgress] = useState(0);
+  const [cachedReports, setCachedReports] = useState<{query: string, report: AccuracyReport}[]>([]);
+  const [isListening, setIsListening] = useState(false);
+  const recognitionRef = useRef<any>(null);
+
+  const isProcessing = step !== 'idle' && step !== 'complete' && step !== 'error';
+  const stepLabel: Record<PipelineStep, string> = {
+    idle: 'Active', scanning: 'SCANNING', extracting: 'EXTRACTING',
+    searching: 'SEARCHING', verifying: 'VERIFYING', complete: 'Complete', error: 'Error',
+  };
+  const navItems: { id: ViewTab; icon: string; label: string }[] = [
+    { id: 'terminal', icon: 'terminal', label: 'Terminal' },
+    { id: 'nodes', icon: 'troubleshoot', label: 'Nodes' },
+    { id: 'registry', icon: 'analytics', label: 'History' },
+    { id: 'system', icon: 'settings_suggest', label: 'System' },
+  ];
+  
+  useEffect(() => {
+    let interval: NodeJS.Timeout;
+    if (step === 'complete' && reportData) {
+      setPipelineProgress(reportData.overallTrustScore);
+    } else if (isProcessing) {
+      if (pipelineProgress === 0) setPipelineProgress(5);
+      interval = setInterval(() => {
+        setPipelineProgress(prev => {
+          if (prev >= 98) return 98;
+          // Frequent small jumps for smoothness
+          const next = prev + (Math.random() * 2 + 0.5);
+          return next > 98 ? 98 : next;
+        });
+      }, 400); // More frequent updates
+    } else if (step === 'idle' || step === 'error') {
+      setPipelineProgress(0);
+    }
+    return () => clearInterval(interval);
+  }, [isProcessing, step === 'complete', reportData]);
+  
+  useEffect(() => {
+    setSeed(Math.floor(Math.random() * 2));
+  }, []);
+
+  const fetchCache = async () => {
+    try {
+      const res = await fetch("/api/factcheck/cache");
+      if (res.ok) {
+        const data = await res.json();
+        setCachedReports(data.entries || []);
+      }
+    } catch (e) {
+      console.warn("Failed to fetch cache", e);
+    }
+  };
+
+  useEffect(() => {
+    if (currentView === 'system') {
+      fetchCache();
+    }
+  }, [currentView]);
+
+  const currentPills = React.useMemo(() => {
+    const idx = inputMode === 'text' ? seed : (seed + 1) % 2;
+    const all = [
+      SUGGESTIONS.iran[idx],
+      SUGGESTIONS.india[idx],
+      SUGGESTIONS.global[idx],
+      SUGGESTIONS.it[idx],
+      SUGGESTIONS.digital[idx],
+      SUGGESTIONS.ipl[idx],
+    ];
+    return inputMode === 'text' ? all.slice(0, 5) : all;
+  }, [inputMode, seed]);
+  
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Sync theme with body class
+  useEffect(() => {
+    if (themeMode === 'Light') {
+      document.body.classList.add('light');
+    } else {
+      document.body.classList.remove('light');
+    }
+  }, [themeMode]);
 
   useEffect(() => {
     const saved = localStorage.getItem("factcheck_history");
@@ -122,7 +231,60 @@ export default function Home() {
     });
   };
 
-  const handleAnalyze = async (e?: React.FormEvent, overrideInput?: string) => {
+  const toggleListening = () => {
+    if (isListening) {
+      if (recognitionRef.current) {
+        recognitionRef.current.stop();
+      }
+      setIsListening(false);
+      return;
+    }
+
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      setErrorMsg("Your browser does not support speech recognition.");
+      return;
+    }
+
+    if (!recognitionRef.current) {
+      const recognition = new SpeechRecognition();
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      
+      recognition.onresult = (event: any) => {
+        let newFinalText = "";
+        for (let i = event.resultIndex; i < event.results.length; ++i) {
+          if (event.results[i].isFinal) {
+             newFinalText += event.results[i][0].transcript;
+          }
+        }
+        if (newFinalText) {
+           setInput(prev => (prev ? prev + " " : "") + newFinalText.trim());
+        }
+      };
+
+      recognition.onerror = (event: any) => {
+        console.error(event.error);
+        if (event.error === 'not-allowed') setErrorMsg('Microphone access denied. Please allow it in the browser.');
+        setIsListening(false);
+      };
+
+      recognition.onend = () => {
+        setIsListening(false);
+      };
+
+      recognitionRef.current = recognition;
+    }
+
+    try {
+      recognitionRef.current.start();
+      setIsListening(true);
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleAnalyze = async (e?: React.FormEvent, overrideInput?: string, mode: 'quick' | 'deep' = 'deep') => {
     if (e) e.preventDefault();
     const targetInput = overrideInput || input;
     if (!targetInput.trim()) return;
@@ -138,11 +300,12 @@ export default function Home() {
       const apiCall = fetch("/api/factcheck", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ input: targetInput })
+        body: JSON.stringify({ input: targetInput, mode })
       });
 
-      setTimeout(() => setStep(prev => prev === 'extracting' ? 'searching' : prev), 2500);
-      setTimeout(() => setStep(prev => prev === 'searching' ? 'verifying' : prev), 5500);
+      const isQuick = mode === 'quick';
+      setTimeout(() => setStep(prev => prev === 'extracting' ? 'searching' : prev), isQuick ? 800 : 2500);
+      setTimeout(() => setStep(prev => prev === 'searching' ? 'verifying' : prev), isQuick ? 1800 : 5500);
 
       const res = await apiCall;
       if (!res.ok) {
@@ -155,8 +318,18 @@ export default function Home() {
       }
       const data: AccuracyReport = await res.json();
       setReportData(data);
-      setStep("complete");
-      setCurrentView('nodes');
+      
+      if (data.cached) {
+        // INSTANT HIT: Skip all simulated delays
+        setStep("complete");
+        setCurrentView('nodes');
+      } else {
+        // NORMAL PATH: Wait for the simulated pipeline to reach the natural finish
+        setTimeout(() => {
+          setStep("complete");
+          setCurrentView('nodes');
+        }, isQuick ? 2500 : 7000);
+      }
 
       const outcome = data.overallTrustScore > 75 ? 'Verified' : data.overallTrustScore > 40 ? 'Substantiated' : 'Flagged';
       saveToHistory(targetInput, data.overallTrustScore, outcome);
@@ -166,84 +339,101 @@ export default function Home() {
     }
   };
 
-  const isProcessing = step !== 'idle' && step !== 'complete' && step !== 'error';
-  const stepLabel: Record<PipelineStep, string> = {
-    idle: 'Active', scanning: 'SCANNING', extracting: 'EXTRACTING',
-    searching: 'SEARCHING', verifying: 'VERIFYING', complete: 'Complete', error: 'Error',
-  };
-  const navItems: { id: ViewTab; icon: string; label: string }[] = [
-    { id: 'terminal', icon: 'terminal', label: 'Terminal' },
-    { id: 'nodes', icon: 'troubleshoot', label: 'Nodes' },
-    { id: 'registry', icon: 'analytics', label: 'Registry' },
-    { id: 'system', icon: 'account_tree', label: 'System' },
-  ];
-
   return (
     <>
       {/* ── TOP APP BAR ─────────────────────────────── */}
-      <header className="bg-[#071327]/80 backdrop-blur-xl text-[#b7c4ff] flex justify-between items-center px-8 py-6 max-w-full fixed top-0 w-full z-50 shadow-[0px_24px_48px_rgba(0,76,237,0.08)]">
-        <div className="flex items-center gap-4">
-          <span className="material-symbols-outlined text-2xl">grid_view</span>
-          <h1 className="font-['Manrope'] tracking-tighter uppercase font-black text-2xl text-[#b7c4ff] italic -skew-x-12 ml-4">AXIOM.NULL</h1>
+      <header className="bg-surface/80 backdrop-blur-xl text-primary flex justify-between items-center px-4 md:px-8 py-4 md:py-6 max-w-full fixed top-0 w-full z-50 shadow-panel">
+        <div className="flex items-center gap-3 relative transition-transform hover:scale-[1.05] duration-300">
+          <div className="w-8 h-8 md:w-10 md:h-10 rounded-full bg-surface-container-high/60 flex items-center justify-center overflow-hidden border border-outline-variant/30 flex-shrink-0 shadow-panel">
+            <img 
+              src="/logo.png" 
+              alt="Logo" 
+              className="w-5 h-5 md:w-7 md:h-7 object-contain mix-blend-screen" 
+            />
+          </div>
+          <h1 className="font-['Manrope'] tracking-tighter uppercase font-black text-xl md:text-2xl text-primary italic -skew-x-12">AXIOM.NULL</h1>
         </div>
         <nav className="hidden md:flex gap-8 items-center">
-          {navItems.slice(0, 3).map(item => (
+          {navItems.map(item => (
             <button key={item.id} onClick={() => setCurrentView(item.id)}
               className={`font-label text-[10px] uppercase tracking-widest py-1 transition-all duration-300 ${
                 currentView === item.id
-                  ? 'text-[#b7c4ff] border-b-2 border-[#b7c4ff]'
-                  : 'text-[#748194] hover:text-white hover:bg-[#1f2a3f]/50'
+                  ? 'text-primary border-b-2 border-primary'
+                  : 'text-outline hover:text-on-surface'
               }`}>
               {item.label}
             </button>
           ))}
-          <button onClick={() => setCurrentView('system')}
-            className={`font-label text-[10px] uppercase tracking-widest py-1 transition-all duration-300 ${
-              currentView === 'system'
-                ? 'text-[#b7c4ff] border-b-2 border-[#b7c4ff]'
-                : 'text-[#748194] hover:text-white hover:bg-[#1f2a3f]/50'
-            }`}>
-            Registry
-          </button>
         </nav>
-        <div className="flex items-center gap-4">
-          <div className="w-10 h-10 bg-surface-container-highest border border-outline-variant flex items-center justify-center">
-            <span className="material-symbols-outlined">account_circle</span>
-          </div>
+        <div className="flex items-center gap-3 md:gap-6 pr-1 md:pr-4">
+          {/* Theme Toggle */}
+          <button 
+            onClick={() => setThemeMode(themeMode === 'Dark' ? 'Light' : 'Dark')}
+            className={`w-8 h-8 md:w-10 md:h-10 rounded-full transition-all flex items-center justify-center border hover:border-primary/50 ${
+              themeMode === 'Light' 
+                ? 'bg-[#f5deb3] border-[#f5deb3] text-black shadow-glow scale-105' 
+                : 'border-outline-variant/30 text-outline hover:text-on-surface'
+            }`}
+            title="Toggle Theme"
+          >
+            <span className="material-symbols-outlined text-lg transition-transform hover:rotate-12">
+              {themeMode === 'Dark' ? 'light_mode' : 'dark_mode'}
+            </span>
+          </button>
+
+          <button 
+            onClick={() => setCurrentView('profile')}
+            className={`w-10 h-10 rounded-full transition-all flex items-center justify-center overflow-hidden border-2 ${
+              currentView === 'profile' 
+                ? 'border-primary shadow-glow scale-105' 
+                : 'border-outline-variant hover:border-primary/50'
+            }`}
+          >
+            <img 
+              src="/profile_pravin.jpg" 
+              alt="Profile" 
+              className="w-full h-full object-cover"
+              onError={(e) => {
+                e.currentTarget.src = "https://www.gravatar.com/avatar/00000000000000000000000000000000?d=mp&f=y";
+              }}
+            />
+          </button>
         </div>
-        <div className="bg-gradient-to-r from-[#1f2a3f] to-transparent h-[1px] w-full absolute bottom-0 left-0"></div>
+        <div className="bg-gradient-to-r from-surface-container-highest to-transparent h-[1px] w-full absolute bottom-0 left-0"></div>
       </header>
 
       {/* ── MAIN ────────────────────────────────────── */}
-      <main className="pt-32 px-6 md:px-12 max-w-7xl mx-auto space-y-24 relative">
+      <main className="pt-24 md:pt-32 px-4 md:px-12 max-w-7xl mx-auto space-y-12 md:space-y-24 relative">
 
         {/* ── TERMINAL VIEW (VERIFY) ───────────────── */}
         {currentView === 'terminal' && (
           <>
             {/* Hero Section */}
             <section className="relative">
-              <div className="absolute -top-12 -left-12 text-primary opacity-10 select-none pointer-events-none">
-                <span className="text-[12rem] font-headline font-black leading-none tracking-tighter uppercase">VERIFY</span>
+              <div className="absolute -top-4 md:-top-12 -left-4 md:-left-12 text-primary opacity-10 select-none pointer-events-none hidden sm:block">
+                <span className="text-7xl md:text-[12rem] font-headline font-black leading-none tracking-tighter uppercase">VERIFY</span>
               </div>
-              <div className="flex flex-col md:flex-row items-start gap-12 relative z-10">
+              <div className="flex flex-col md:flex-row items-start gap-8 md:gap-12 relative z-10">
                 {/* Left Copy */}
-                <div className="md:w-3/5 space-y-6">
-                  <h2 className="font-headline text-5xl md:text-7xl font-black uppercase tracking-tighter leading-[0.9] text-on-surface">
-                    Verify content <br/>
-                    <span className="text-primary italic -skew-x-6 inline-block">Absolute Certainty</span>
+                <div className="md:w-3/5 space-y-4 md:space-y-6 mt-4 md:mt-0">
+                  <h2 className="font-headline text-4xl md:text-7xl font-black tracking-tighter leading-[0.9] text-on-surface">
+                    Intelligence for <br/>
+                    <div className="ml-16 md:ml-48">
+                      <span className="text-primary inline-block">Truth&nbsp;&nbsp;Verification</span>
+                    </div>
                   </h2>
-                  <p className="text-on-surface-variant max-w-lg text-lg font-light leading-relaxed">
-                    Neural-linked fact extraction using the Axiom pipeline. Cross-referencing 14.2B data points per millisecond for sub-atomic truth detection.
+                  <p className="text-on-surface/90 max-w-2xl text-lg font-extralight leading-relaxed">
+                    Our AI-powered system verifies claims in real time <br/>
+                    by cross-referencing them with reliable, real-world evidence <br/>
+                    <br/>
+                    It handles ambiguity and conflicting information with transparent reasoning, <br/>
+                    delivering clear, accurate, and highly trustworthy insights!
                   </p>
                   {/* Quick reference pills */}
                   <div className="flex flex-wrap gap-3 pt-2">
-                    {[
-                      { label: 'Global:', text: 'World Bank predicts 3% GDP growth in 2026' },
-                      { label: 'India:', text: 'ISRO announces new Mars mission launch' },
-                      { label: 'Tech:', text: 'AI coding replaces 50% of junior developers' },
-                    ].map(pill => (
+                    {currentPills.map(pill => (
                       <button key={pill.text} onClick={() => handleAnalyze(undefined, pill.text)}
-                        className="px-3 py-1 border border-outline-variant/30 bg-surface-container/40 text-[10px] font-label uppercase tracking-widest hover:bg-surface-container hover:border-primary/40 transition-all">
+                        className="px-4 py-1.5 border border-outline-variant/30 bg-surface-container/40 text-[10px] font-label uppercase tracking-widest hover:bg-surface-container hover:border-primary/40 transition-all rounded-full">
                         <span className="text-primary">{pill.label}</span> <span className="text-on-surface-variant">{pill.text.substring(0, 32)}…</span>
                       </button>
                     ))}
@@ -251,8 +441,8 @@ export default function Home() {
                 </div>
 
                 {/* Input Card (Asymmetric) */}
-                <div className="md:w-2/5 w-full bg-surface-container-high p-1 glass-panel asymmetric-tilt-right mt-12 md:mt-0 shadow-2xl">
-                  <div className="bg-surface-container-lowest border border-outline-variant/20">
+                <div className="md:w-2/5 w-full bg-surface-container-high p-1 glass-panel asymmetric-tilt-right mt-12 md:mt-0 shadow-panel rounded-3xl border-l-4 border-primary shadow-[inset_6px_0_15px_-6px_rgba(183,196,255,0.5)]">
+                  <div className="bg-surface-container-lowest border border-outline-variant/20 rounded-[1.3rem] overflow-hidden">
                     {/* Mode Toggle */}
                     <div className="flex border-b border-outline-variant/20">
                       <button
@@ -272,22 +462,49 @@ export default function Home() {
                     </div>
 
                     {inputMode === 'text' ? (
-                      <form onSubmit={handleAnalyze} className="p-8 space-y-6">
+                      <div className="p-8 space-y-6">
                         <div className="space-y-2">
                           <label className="font-label text-[10px] uppercase tracking-[0.2em] text-primary block">Source Analysis Input</label>
                           <textarea
-                            className="w-full bg-transparent border-b border-outline-variant focus:border-primary focus:ring-0 text-on-surface placeholder:text-outline/30 min-h-[120px] resize-none py-2 font-body text-sm"
+                            className="w-full border border-outline-variant/40 focus:border-primary focus:ring-1 focus:ring-primary/20 placeholder:text-outline/30 min-h-[120px] resize-none p-4 font-body text-sm rounded-xl transition-all"
+                            style={{ backgroundColor: 'transparent', color: 'inherit' }}
                             placeholder="Paste claim, URL, or metadata hash..."
                             value={input}
                             onChange={e => setInput(e.target.value)}
                             disabled={isProcessing}
                           />
                         </div>
-                        <button type="submit" disabled={!input.trim() || isProcessing}
-                          className="w-full bg-gradient-to-r from-primary to-primary-container text-on-primary font-headline font-extrabold uppercase tracking-widest py-5 text-sm hover:brightness-110 active:scale-95 transition-all shadow-[0_0_20px_rgba(183,196,255,0.3)] disabled:opacity-50 disabled:cursor-not-allowed">
-                          {isProcessing ? '● Analyzing Stream...' : 'Analyze Stream'}
-                        </button>
-                      </form>
+                        <div className="flex gap-3">
+                          <button
+                            type="button"
+                            onClick={toggleListening}
+                            disabled={isProcessing}
+                            className={`relative w-16 md:w-20 flex-shrink-0 flex items-center justify-center rounded-xl transition-all border ${
+                              isListening 
+                                ? 'bg-error text-white border-error shadow-[0_0_20px_rgba(239,68,68,0.5)] animate-pulse' 
+                                : 'bg-surface-container border-outline-variant/30 text-primary hover:border-primary/50 hover:bg-surface-container-high'
+                            }`}
+                            title={isListening ? 'Stop listening' : 'Start voice input'}
+                          >
+                            <span className="material-symbols-outlined text-2xl">
+                              {isListening ? 'mic' : 'mic_none'}
+                            </span>
+                            {isListening && (
+                              <span className="absolute top-2 right-2 w-2 h-2 bg-white rounded-full animate-ping"></span>
+                            )}
+                          </button>
+
+                          <button 
+                            type="button" 
+                            onClick={(e) => handleAnalyze(undefined, undefined, 'deep')}
+                            disabled={!input.trim() || isProcessing}
+                            className="flex-1 bg-gradient-to-r from-primary to-primary-container text-[#030e22] font-headline font-black uppercase tracking-[0.2em] py-5 text-sm hover:brightness-125 active:scale-95 transition-all shadow-glow hover:shadow-glow-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 rounded-xl"
+                          >
+                            <span className="material-symbols-outlined text-sm">travel_explore</span>
+                            {isProcessing ? 'RESEARCHING...' : 'Deep Research'}
+                          </button>
+                        </div>
+                      </div>
                     ) : (
                       <div className="p-8 space-y-6">
                         <label className="font-label text-[10px] uppercase tracking-[0.2em] text-primary block">Upload Image or Video</label>
@@ -295,7 +512,7 @@ export default function Home() {
                         {/* Drop Zone */}
                         <div
                           onClick={() => fileInputRef.current?.click()}
-                          className="border-2 border-dashed border-outline-variant/40 hover:border-primary/60 transition-colors cursor-pointer flex flex-col items-center justify-center py-10 gap-3 rounded-none bg-surface-container/20 hover:bg-surface-container/40"
+                          className="border-2 border-dashed border-outline-variant/40 hover:border-primary/60 transition-colors cursor-pointer flex flex-col items-center justify-center py-10 gap-3 bg-surface-container/20 hover:bg-surface-container/40 rounded-2xl"
                         >
                           {filePreview ? (
                             // eslint-disable-next-line @next/next/no-img-element
@@ -341,14 +558,10 @@ export default function Home() {
                         <button
                           onClick={handleMediaAnalyze}
                           disabled={!selectedFile || isProcessing}
-                          className="w-full bg-gradient-to-r from-primary to-primary-container text-on-primary font-headline font-extrabold uppercase tracking-widest py-5 text-sm hover:brightness-110 active:scale-95 transition-all shadow-[0_0_20px_rgba(183,196,255,0.3)] disabled:opacity-50 disabled:cursor-not-allowed"
+                          className="w-full bg-gradient-to-r from-primary to-primary-container text-[#030e22] font-headline font-black uppercase tracking-[0.2em] py-5 text-sm hover:brightness-125 active:scale-95 transition-all shadow-glow hover:shadow-glow-lg disabled:opacity-50 disabled:cursor-not-allowed"
                         >
                           {isProcessing ? '● Scanning Media...' : 'Scan & Fact-Check'}
                         </button>
-
-                        <p className="text-outline text-[10px] text-center leading-relaxed">
-                          AI will extract text &amp; claims from the media, then fact-check them against Wikipedia.
-                        </p>
                       </div>
                     )}
                   </div>
@@ -358,7 +571,7 @@ export default function Home() {
 
             {/* Pipeline Status Bento Grid */}
             <section className="grid grid-cols-1 md:grid-cols-4 gap-4 md:gap-0 relative">
-              <div className="md:col-span-2 bg-surface-container-low p-8 border-l-4 border-primary z-20">
+              <div className="md:col-span-2 bg-surface-container-low p-8 border-l-4 border-primary z-20 rounded-2xl shadow-[inset_6px_0_15px_-6px_rgba(183,196,255,0.5)]">
                 <div className="flex justify-between items-start mb-12">
                   <span className="font-label text-[10px] uppercase tracking-[0.2em] text-outline">Pipeline Status</span>
                   <span className="text-primary flex items-center gap-2">
@@ -369,7 +582,7 @@ export default function Home() {
                 <div className="space-y-8">
                   <div className="flex items-center gap-6">
                     <div className="text-4xl font-headline font-black text-on-surface">
-                      {step === 'complete' && reportData ? `${reportData.overallTrustScore}%` : '—'}
+                      {step === 'complete' && reportData ? `${reportData.overallTrustScore}%` : isProcessing ? `${Math.floor(pipelineProgress)}%` : '—'}
                     </div>
                     <div className="text-outline text-xs uppercase tracking-widest">
                       {step === 'complete' ? 'Trust\nScore' : 'Inference\nPrecision'}
@@ -378,14 +591,14 @@ export default function Home() {
                   <div className="w-full h-[2px] bg-surface-variant relative">
                     <div className={`absolute top-0 left-0 h-full bg-primary transition-all duration-1000 ${
                       step === 'complete' && reportData ? '' :
-                      isProcessing ? 'w-1/2 animate-pulse' : 'w-0'
+                      isProcessing ? 'animate-pulse' : 'w-0'
                     }`}
-                    style={step === 'complete' && reportData ? { width: `${reportData.overallTrustScore}%` } : undefined}></div>
+                    style={{ width: step === 'complete' && reportData ? `${reportData.overallTrustScore}%` : isProcessing ? `${pipelineProgress}%` : '0%' }}></div>
                   </div>
                   {step === 'complete' && reportData && (
                     <div className="flex gap-4 mt-4">
                       <button onClick={() => setCurrentView('nodes')}
-                        className="border border-primary text-primary font-label text-[10px] uppercase tracking-widest px-4 py-2 hover:bg-primary hover:text-on-primary transition-all">
+                        className="border border-primary text-primary font-label text-[10px] uppercase tracking-widest px-4 py-2 hover:bg-primary hover:text-on-primary transition-all rounded-lg">
                         View Full Report →
                       </button>
                     </div>
@@ -394,7 +607,7 @@ export default function Home() {
               </div>
 
               {/* Mini Panel 1 */}
-              <div className="bg-surface-container p-8 asymmetric-tilt-left md:-ml-4 md:mt-12 z-10 shadow-xl border border-outline-variant/10">
+              <div className="bg-surface-container p-8 asymmetric-tilt-left md:-ml-4 md:mt-12 z-10 shadow-xl border border-outline-variant/10 rounded-2xl border-l-4 border-primary shadow-[inset_6px_0_15px_-6px_rgba(183,196,255,0.5)]">
                 <span className="material-symbols-outlined text-primary mb-4 block">troubleshoot</span>
                 <h3 className="font-headline font-bold uppercase text-xs tracking-widest mb-2">Heuristic Scanning</h3>
                 <p className="text-on-surface-variant text-[11px] leading-tight">
@@ -410,20 +623,37 @@ export default function Home() {
               </div>
 
               {/* Mini Panel 2 */}
-              <div className="bg-surface-container-high p-8 asymmetric-tilt-right md:-ml-8 md:-mt-8 z-30 shadow-2xl border border-outline-variant/30">
+              <div className="bg-surface-container-high p-8 asymmetric-tilt-right md:-ml-8 md:-mt-8 z-30 shadow-panel border border-outline-variant/30 rounded-2xl border-l-4 border-primary shadow-[inset_6px_0_15px_-6px_rgba(183,196,255,0.5)]">
+                <style>{`
+                  @keyframes eq {
+                    0%, 100% { height: 15%; }
+                    50% { height: 100%; }
+                  }
+                  .animate-eq { animation: eq 8s ease-in-out infinite; }
+                `}</style>
                 <span className="material-symbols-outlined text-primary mb-4 block">analytics</span>
                 <h3 className="font-headline font-bold uppercase text-xs tracking-widest mb-2">Truth Density</h3>
-                <div className="flex items-end gap-1 h-12">
-                  {[20, 40, 100, 60, 80].map((h, i) => (
-                    <div key={i} className="w-2 bg-primary transition-all duration-500" style={{ height: `${isProcessing ? Math.random() * 100 : h}%`, opacity: isProcessing ? 1 : h / 100 }}></div>
-                  ))}
+                <div className="flex items-end gap-[5px] h-20 w-full overflow-hidden">
+                  {Array.from({ length: 14 }).map((_, i) => {
+                    const maxScore = reportData?.overallTrustScore || 0;
+                    return (
+                      <div key={i} 
+                        className={`w-3 bg-primary transition-all duration-1000 rounded-t-[1px] ${isProcessing ? 'animate-eq' : ''}`} 
+                        style={{ 
+                          height: isProcessing ? '15%' : `${Math.max(2, (15 + (i * 6.5)) * (maxScore / 100))}%`,
+                          opacity: isProcessing ? 0.5 : 0.1 + (i * 0.04),
+                          animationDelay: isProcessing ? `${i * 200}ms` : '0ms'
+                        }}>
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
             </section>
 
             {/* Error Banner */}
             {errorMsg && (
-              <div className="border border-error bg-error/5 p-6 flex items-center gap-4">
+              <div className="border border-error bg-error/5 p-6 flex items-center gap-4 rounded-xl">
                 <span className="material-symbols-outlined text-error text-3xl">warning</span>
                 <p className="text-error font-label text-sm uppercase tracking-wider">{errorMsg}</p>
               </div>
@@ -440,7 +670,7 @@ export default function Home() {
                 <div className="flex flex-col gap-0 pb-8">
                   {history.slice(0, 3).map((item, idx) => (
                     <div key={idx}
-                      className={`w-full md:w-[420px] p-6 border border-outline-variant shadow-2xl transition-all hover:z-50 hover:scale-[1.02] cursor-pointer ${
+                      className={`w-full md:w-[420px] p-6 border border-outline-variant shadow-panel transition-all hover:z-50 hover:scale-[1.02] cursor-pointer rounded-2xl border-l-4 border-primary shadow-[inset_6px_0_15px_-6px_rgba(183,196,255,0.5)] ${
                         idx === 0 ? 'z-10 md:self-start' :
                         idx === 1 ? 'z-20 md:self-center -mt-8 md:-mt-10 asymmetric-tilt-left md:translate-x-20' :
                         'z-30 md:self-end -mt-8 md:-mt-10 asymmetric-tilt-right md:-translate-x-8'
@@ -450,11 +680,11 @@ export default function Home() {
                     >
                       <div className="flex justify-between items-center mb-4">
                         <span className="font-label text-[9px] text-primary uppercase tracking-widest">ID: AX-{9020 + idx + 1}</span>
-                        <span className={`font-label text-[9px] uppercase font-bold px-2 py-0.5 border ${
+                        <span className={`font-label text-[9px] uppercase font-bold px-2 py-0.5 border rounded-full ${
                           item.score > 75 ? 'text-[#00ff88] border-[#00ff88]' : item.score > 40 ? 'text-primary border-primary' : 'text-error border-error'
                         }`}>{item.outcome}</span>
                       </div>
-                      <div className="bg-surface-container h-20 mb-4 flex items-center justify-center border border-outline-variant/20">
+                      <div className="bg-surface-container h-20 mb-4 flex items-center justify-center border border-outline-variant/20 rounded-xl">
                         <div className="text-center">
                           <span className="block text-3xl font-headline font-black text-primary">{item.score}%</span>
                           <span className="text-[9px] text-outline uppercase tracking-widest">Trust Score</span>
@@ -509,7 +739,7 @@ export default function Home() {
                       </div>
                     )}
                     {/* Media metadata + extracted content */}
-                    <div className="bg-surface-container-low border border-outline-variant/20 p-6 grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div className="bg-surface-container-low border border-outline-variant/20 p-6 grid grid-cols-1 md:grid-cols-2 gap-6 rounded-2xl">
                       <div className="space-y-3">
                         <div className="flex items-center gap-2 mb-2">
                           <span className="material-symbols-outlined text-primary text-sm">
@@ -524,12 +754,35 @@ export default function Home() {
                           <p className="text-on-surface-variant text-xs leading-relaxed border-l-2 border-primary/30 pl-3">{mediaAnalysis.mediaSummary}</p>
                         </div>
                       </div>
-                      <div className="space-y-2">
-                        <span className="font-label text-[9px] uppercase tracking-widest text-outline block">Extracted Text / Captions</span>
-                        <div className="bg-surface-container p-3 border border-outline-variant/20 max-h-32 overflow-y-auto">
-                          <p className="text-on-surface text-xs leading-relaxed font-mono whitespace-pre-wrap">
-                            {mediaAnalysis.extractedText || <span className="text-outline italic">No text detected in media.</span>}
-                          </p>
+
+                      {/* Right Col: Forensic Detections & Data */}
+                      <div className="space-y-6">
+                        {/* Spatial Detections */}
+                        {mediaAnalysis?.detections && mediaAnalysis.detections.length > 0 && (
+                          <div className="space-y-3">
+                            <div className="flex items-center gap-2">
+                              <span className="material-symbols-outlined text-primary text-sm">filter_center_focus</span>
+                              <span className="font-label text-[10px] uppercase tracking-widest text-on-surface">Spatial Detections (ROI)</span>
+                            </div>
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                              {mediaAnalysis.detections.map((det, idx) => (
+                                <div key={idx} className="bg-surface-container border border-outline-variant/30 p-3 flex flex-col gap-1 rounded-xl">
+                                  <span className="text-[10px] font-black uppercase tracking-wider text-primary">{det.label}</span>
+                                  <span className="text-[9px] font-mono text-outline">ROI: [{det.box_2d.join(', ')}]</span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Extracted Text/Captions */}
+                        <div className="space-y-4">
+                          <span className="font-label text-[9px] uppercase tracking-widest text-outline block">Extracted Text / Captions</span>
+                          <div className="bg-surface-container p-3 border border-outline-variant/20 max-h-32 overflow-y-auto rounded-xl">
+                            <p className="text-on-surface text-xs leading-relaxed font-mono whitespace-pre-wrap">
+                              {mediaAnalysis.extractedText || <span className="text-outline italic">No text detected in media.</span>}
+                            </p>
+                          </div>
                         </div>
                       </div>
                     </div>
@@ -539,7 +792,7 @@ export default function Home() {
                 {/* Score Ring + Summary */}
                 <div className="grid grid-cols-1 md:grid-cols-12 gap-4">
                   {/* Circular Score */}
-                  <div className="md:col-span-4 bg-surface-container-low p-8 border border-outline-variant/20 flex flex-col items-center justify-center space-y-6">
+                  <div className="md:col-span-4 bg-surface-container-low p-8 border border-outline-variant/20 flex flex-col items-center justify-center space-y-6 rounded-2xl">
                     <span className="font-label text-[10px] uppercase tracking-[0.2em] text-outline">Inference Score</span>
                     <div className="relative flex items-center justify-center">
                       <svg className="w-44 h-44 transform -rotate-90">
@@ -547,7 +800,7 @@ export default function Home() {
                         <circle className="text-primary" cx="88" cy="88" fill="transparent" r="80" stroke="currentColor"
                           strokeDasharray="502.65"
                           strokeDashoffset={502.65 - (502.65 * (reportData.overallTrustScore / 100))}
-                          strokeLinecap="square" strokeWidth="10"
+                          strokeLinecap="round" strokeWidth="10"
                           style={{ transition: 'stroke-dashoffset 1.5s ease-out' }}/>
                       </svg>
                       <div className="absolute inset-0 flex flex-col items-center justify-center">
@@ -577,13 +830,15 @@ export default function Home() {
                       const isTrue = claim.status === 'True';
                       const isFalse = claim.status === 'False';
                       return (
-                        <div key={idx} className={`p-6 border bg-surface-container-lowest ${isFalse ? 'border-error/40' : isTrue ? 'border-primary/30' : 'border-outline-variant/20'}`}>
+                        <div key={idx} className={`p-6 border bg-surface-container-lowest rounded-2xl border-l-4 shadow-[inset_6px_0_15px_-6px_rgba(183,196,255,0.3)] ${
+                          isFalse ? 'border-l-error border-error/40' : isTrue ? 'border-l-primary border-primary/30' : 'border-l-outline-variant border-outline-variant/20'
+                        }`}>
                           <div className="flex items-start justify-between gap-4 mb-4">
                             <div className="space-y-1">
                               <span className="font-label text-[9px] text-outline uppercase tracking-widest">CLAIM_ID :: {claim.id.toUpperCase()}</span>
                               <p className="font-headline font-bold text-base text-on-surface leading-tight">"{claim.claim}"</p>
                             </div>
-                            <span className={`font-label text-[9px] uppercase font-bold px-3 py-1 border whitespace-nowrap flex items-center gap-1 ${isTrue ? 'text-[#00ff88] border-[#00ff88]' : isFalse ? 'text-error border-error' : 'text-primary border-primary'}`}>
+                            <span className={`font-label text-[9px] uppercase font-bold px-3 py-1 border rounded-full whitespace-nowrap flex items-center gap-1 ${isTrue ? 'text-[#00ff88] border-[#00ff88]' : isFalse ? 'text-error border-error' : 'text-primary border-primary'}`}>
                               <span className="material-symbols-outlined text-xs">{isTrue ? 'check_circle' : isFalse ? 'cancel' : 'warning'}</span>
                               {claim.status.toUpperCase()}
                             </span>
@@ -594,7 +849,7 @@ export default function Home() {
                             </div>
                             <p className="text-on-surface-variant text-xs leading-relaxed border-l-2 border-primary/30 pl-4">{claim.reasoning}</p>
                             {claim.correctedStatement && (
-                              <div className="flex gap-2 items-start bg-surface-container p-3 border-l-2 border-[#00ff88]/60">
+                              <div className="flex gap-2 items-start bg-surface-container p-3 border-l-2 border-[#00ff88]/60 rounded-xl">
                                 <span className="material-symbols-outlined text-[#00ff88] text-sm shrink-0 mt-0.5">lightbulb</span>
                                 <div>
                                   <span className="font-label text-[9px] uppercase tracking-widest text-[#00ff88] block mb-1">Correct Statement</span>
@@ -612,11 +867,7 @@ export default function Home() {
                                   return (
                                     <a key={i} href={ev.url} target="_blank" rel="noreferrer"
                                       title={ev.title}
-                                      className={`flex items-center gap-1.5 px-2 py-1 border text-[9px] font-label uppercase tracking-wide hover:brightness-125 transition-all max-w-[220px] ${
-                                        isWiki
-                                          ? 'border-primary/30 bg-primary/5 text-primary hover:border-primary'
-                                          : 'border-yellow-400/30 bg-yellow-400/5 text-yellow-400 hover:border-yellow-400'
-                                      }`}>
+                                      className="flex items-center gap-1.5 px-2 py-1 border border-primary/30 bg-primary/5 text-primary hover:border-primary text-[9px] font-label uppercase tracking-wide hover:brightness-125 transition-all max-w-[220px] rounded-lg">
                                       <span className="material-symbols-outlined text-[10px] shrink-0">{isNews ? 'newspaper' : 'menu_book'}</span>
                                       <span className="truncate">{domain}</span>
                                     </a>
@@ -633,20 +884,73 @@ export default function Home() {
 
                 {/* Final Conclusion / Verdict */}
                 {reportData.globalConclusion && (
-                  <div className="bg-primary/5 border border-primary/20 p-8 space-y-4 mt-8">
+                  <div className="bg-primary/5 border border-primary/20 p-8 space-y-4 mt-8 rounded-2xl border-l-4 border-primary shadow-[inset_6px_0_15px_-6px_rgba(183,196,255,0.5)]">
                     <div className="flex items-center gap-3">
                       <span className="material-symbols-outlined text-primary text-xl">insights</span>
                       <h3 className="font-headline font-black uppercase tracking-widest text-sm text-primary">Final Verdict & Analysis</h3>
                     </div>
-                    <p className="text-on-surface-variant text-sm leading-relaxed border-l-2 border-primary/40 pl-4 font-medium">
-                      {reportData.globalConclusion}
-                    </p>
+                    <div 
+                      className="text-on-surface-variant text-sm leading-relaxed border-l-2 border-primary/40 pl-4 font-medium [&_u]:text-on-surface [&_u]:decoration-primary [&_u]:underline-offset-4 [&_u]:decoration-2 [&_u]:transition-all [&_u]:duration-500 hover:[&_u]:text-primary hover:[&_u]:decoration-[#00ff88]"
+                      dangerouslySetInnerHTML={{ __html: reportData.globalConclusion }}
+                    />
+                  </div>
+                )}
+
+                {/* Fact vs. Fiction Ledger (Triangulation) */}
+                {reportData.factCorrections && reportData.factCorrections.length > 0 && (
+                  <div className="bg-surface-container-highest/30 border-l-4 border-error p-8 space-y-4 rounded-2xl shadow-[inset_6px_0_15px_-6px_rgba(255,180,171,0.3)]">
+                    <div className="flex items-center gap-3">
+                      <span className="material-symbols-outlined text-error">gavel</span>
+                      <h3 className="font-headline font-black uppercase tracking-widest text-sm text-error">Fact Decoupling (Corrections)</h3>
+                    </div>
+                    <div className="grid grid-cols-1 gap-3">
+                      {reportData.factCorrections.map((corr, i) => (
+                        <div key={i} className="flex flex-col md:flex-row md:items-center gap-4 p-4 bg-surface-container/50 border border-outline-variant/10 hover:border-error/30 transition-all rounded-xl">
+                          <div className="flex-1">
+                            <span className="text-[9px] font-black uppercase text-error/60 block mb-1">False Component</span>
+                            <p className="text-sm line-through decoration-error/50 text-on-surface-variant font-medium">{corr.falseComponent}</p>
+                          </div>
+                          <div className="hidden md:block text-outline opacity-30 text-center">
+                            <span className="material-symbols-outlined">arrow_forward</span>
+                          </div>
+                          <div className="flex-1">
+                            <span className="text-[9px] font-black uppercase text-primary/60 block mb-1">Correct Fact</span>
+                            <p className="text-sm text-primary font-bold">{corr.correctFact}</p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* YouTube Evidence Link */}
+                {reportData.youtubeUrl && (
+                  <div className="space-y-4 pt-4">
+                    <div className="flex items-center gap-3">
+                      <span className="material-symbols-outlined text-red-500/50 text-xl">video_library</span>
+                      <h3 className="font-headline font-black uppercase tracking-widest text-xs text-outline">Multimedia Evidence</h3>
+                    </div>
+                    <a 
+                      href={reportData.youtubeUrl} 
+                      target="_blank" 
+                      rel="noopener noreferrer" 
+                      className="flex items-center justify-between p-5 bg-surface-container-high/60 border border-outline-variant/30 text-on-surface-variant hover:bg-surface-container-highest hover:text-on-surface hover:border-outline-variant/60 active:scale-[0.99] transition-all group rounded-xl"
+                    >
+                      <span className="font-label uppercase text-[10px] tracking-[0.2em] font-black">
+                        Watch Related Fact-Check Resources on YouTube
+                      </span>
+                      <div className="transition-transform group-hover:scale-110">
+                        <svg viewBox="0 0 24 24" fill="currentColor" className="w-6 h-6 text-[#FF0000]/80">
+                          <path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z"/>
+                        </svg>
+                      </div>
+                    </a>
                   </div>
                 )}
 
                 {/* Related References */}
                 {reportData.relatedReferences && reportData.relatedReferences.length > 0 && (
-                  <div className="bg-surface-container-low border border-outline-variant/20 p-8 space-y-6">
+                  <div className="space-y-6 pt-4">
                     <div className="flex items-center gap-3">
                       <span className="material-symbols-outlined text-primary">auto_stories</span>
                       <h3 className="font-headline font-bold uppercase tracking-widest text-xs text-on-surface">Related Node Queries</h3>
@@ -656,7 +960,7 @@ export default function Home() {
                       {reportData.relatedReferences.map((ref, idx) => (
                         <button key={idx}
                           onClick={() => { handleAnalyze(undefined, ref.question); }}
-                          className={`flex items-start gap-3 p-4 border text-left hover:brightness-125 transition-all group ${CAT_COLORS[ref.category] || 'border-outline-variant/20 bg-surface-container/50 text-on-surface-variant'}`}>
+                          className="flex items-start gap-4 p-5 border border-outline-variant/20 bg-surface-container/40 text-on-surface-variant hover:bg-surface-container-high hover:border-outline-variant/40 hover:brightness-110 transition-all group rounded-xl active:scale-[0.98]">
                           <span className="material-symbols-outlined text-xs mt-1 shrink-0">subdirectory_arrow_right</span>
                           <div>
                             <span className="text-[9px] font-black uppercase tracking-widest opacity-60 block">{ref.category}</span>
@@ -686,7 +990,7 @@ export default function Home() {
               </button>
             </div>
 
-            <div className="bg-surface-container-low border border-outline-variant/20 overflow-hidden">
+            <div className="bg-surface-container-low border border-outline-variant/20 overflow-hidden rounded-2xl border-l-4 border-primary shadow-[inset_6px_0_15px_-6px_rgba(183,196,255,0.5)]">
               <div className="overflow-x-auto">
                 <table className="w-full text-left border-collapse">
                   <thead className="bg-surface-container-highest text-[9px] font-black uppercase text-outline tracking-widest">
@@ -736,30 +1040,232 @@ export default function Home() {
           </section>
         )}
 
+        {/* ── PROFILE VIEW ─────────────────────────── */}
+        {currentView === 'profile' && (() => {
+          const avgScore = history.length > 0 
+            ? Math.round(history.reduce((acc, h) => acc + h.score, 0) / history.length) 
+            : 0;
+          const agentRank = avgScore > 85 ? 'ORACLE' : avgScore > 65 ? 'FACT-CHECKER' : avgScore > 40 ? 'SKEPTIC' : 'APPRENTICE';
+          
+          return (
+            <section className="space-y-12 pb-32 animate-in fade-in slide-in-from-bottom-4 duration-700">
+              <div className="relative h-48 md:h-64 bg-surface-container-high overflow-hidden border border-outline-variant/20 rounded-2xl">
+                <div className="absolute inset-0 bg-gradient-to-br from-primary/10 to-transparent"></div>
+                <div className="absolute top-0 left-0 w-full h-full opacity-20 pointer-events-none" 
+                  style={{ backgroundImage: 'radial-gradient(circle at 1px 1px, var(--primary) 1px, transparent 0)', backgroundSize: '24px 24px' }}></div>
+                <div className="absolute bottom-8 left-8 md:left-12 flex items-end gap-6">
+                  <div className="w-32 h-32 md:w-44 md:h-44 bg-surface-container-lowest border-4 border-surface ring-1 ring-primary/20 shadow-glow rounded-full overflow-hidden flex items-center justify-center">
+                    <img 
+                      src="/profile_pravin.jpg" 
+                      alt="Pravin Kumar" 
+                      className="w-full h-full object-cover"
+                    />
+                  </div>
+                  <div className="pb-4">
+                    <div className="flex flex-col mb-1">
+                      <span className="font-headline text-2xl font-black uppercase tracking-[0.3em] text-primary">NEWCOMERS</span>
+                      <span className="font-label text-[10px] uppercase tracking-[0.2em] text-outline font-bold">College: HIT Kolkata</span>
+                    </div>
+                    <h2 className="font-headline text-4xl md:text-6xl font-black uppercase tracking-tighter text-on-surface leading-none">Pravin Kumar</h2>
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                {[
+                  { label: 'Total Verifications', val: history.length, sub: 'Claims processed in current ledger', icon: 'database' },
+                  { label: 'Mean Reliability', val: `${avgScore}%`, sub: 'Average trust score across all nodes', icon: 'analytics' },
+                  { label: 'Intelligence Rank', val: agentRank, sub: 'Ranked based on truth-to-noise ratio', icon: 'verified' },
+                ].map(stat => (
+                  <div key={stat.label} className="bg-surface-container-low p-8 border border-outline-variant/20 shadow-panel hover:border-primary/40 transition-all group rounded-2xl">
+                    <div className="flex justify-between items-start mb-6">
+                      <span className="font-label text-[10px] uppercase tracking-[0.2em] text-outline">{stat.label}</span>
+                      <span className="material-symbols-outlined text-primary group-hover:scale-110 transition-transform">{stat.icon}</span>
+                    </div>
+                    <div className="text-4xl font-headline font-black text-on-surface mb-2">{stat.val}</div>
+                    <div className="text-[10px] uppercase tracking-widest text-outline">{stat.sub}</div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                <div className="bg-surface-container-low border border-outline-variant/30 p-8 space-y-6 rounded-2xl">
+                  <h3 className="font-headline font-bold uppercase tracking-widest text-xs text-on-surface flex items-center gap-2">
+                    <span className="material-symbols-outlined text-primary text-sm">history</span>
+                    Recent Activity Pulse
+                  </h3>
+                  <div className="space-y-4">
+                    {history.slice(0, 5).map((item, i) => (
+                      <div key={i} className="flex justify-between items-center p-4 border-b border-outline-variant/20 hover:bg-surface-container-high/30 transition-colors">
+                        <div className="space-y-1">
+                          <div className="text-[11px] text-on-surface font-medium truncate max-w-[200px] md:max-w-xs">{item.claim}</div>
+                          <div className="text-[9px] text-outline uppercase tracking-wider">{item.timestamp}</div>
+                        </div>
+                        <div className="text-[10px] font-black text-primary">{item.score}%</div>
+                      </div>
+                    ))}
+                    {history.length === 0 && (
+                      <div className="py-12 text-center text-outline text-[10px] uppercase tracking-widest italic">No pulses detected.</div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="bg-surface-container-low border border-outline-variant/30 p-8 space-y-6 rounded-2xl">
+                  <h3 className="font-headline font-bold uppercase tracking-widest text-xs text-on-surface flex items-center gap-2">
+                    <span className="material-symbols-outlined text-primary text-sm">groups</span>
+                    Squad Registry — Newcomers
+                  </h3>
+                  <div className="space-y-4">
+                    <div className="bg-primary/5 border border-primary/20 p-4 flex items-center gap-4 group hover:bg-primary/10 transition-all rounded-xl">
+                      <div className="w-10 h-10 bg-primary/20 rounded-full flex items-center justify-center text-primary">
+                        <span className="material-symbols-outlined text-sm">star</span>
+                      </div>
+                      <div>
+                        <span className="font-label text-[9px] uppercase tracking-widest text-primary block">Team Leader</span>
+                        <div className="text-sm font-bold text-on-surface">Devraj Mandel</div>
+                      </div>
+                    </div>
+                    <div className="bg-surface-container border border-outline-variant/20 p-4 flex items-center gap-4 group hover:bg-surface-container-high transition-all rounded-xl">
+                      <div className="w-10 h-10 bg-outline/10 rounded-full flex items-center justify-center text-outline">
+                        <span className="material-symbols-outlined text-sm">person</span>
+                      </div>
+                      <div>
+                        <span className="font-label text-[9px] uppercase tracking-widest text-outline block">Active Member</span>
+                        <div className="text-sm font-bold text-on-surface">Ansh Kumar</div>
+                      </div>
+                    </div>
+                    <div className="bg-surface-container border border-outline-variant/20 p-4 flex items-center gap-4 group hover:bg-surface-container-high transition-all rounded-xl">
+                      <div className="w-10 h-10 bg-outline/10 rounded-full flex items-center justify-center text-outline">
+                        <span className="material-symbols-outlined text-sm">person</span>
+                      </div>
+                      <div>
+                        <span className="font-label text-[9px] uppercase tracking-widest text-outline block">Active Member</span>
+                        <div className="text-sm font-bold text-on-surface">Pravin Kumar (You)</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="space-y-6">
+                  <div className="bg-primary/5 border border-primary/20 p-8 space-y-4 rounded-2xl">
+                    <h3 className="font-headline font-bold uppercase tracking-widest text-xs text-primary">System Credentials</h3>
+                    <div className="space-y-3">
+                      <div className="flex justify-between text-[11px]">
+                        <span className="text-outline">Access Tier:</span>
+                        <span className="text-primary font-black uppercase">Root Intelligence</span>
+                      </div>
+                      <div className="flex justify-between text-[11px]">
+                        <span className="text-outline">Verification Mode:</span>
+                        <span className="text-primary font-black uppercase">Multi-Agent Hybrid</span>
+                      </div>
+                      <div className="flex justify-between text-[11px]">
+                        <span className="text-outline">Encryption Status:</span>
+                        <span className="text-[#00ff88] font-black uppercase">Active AES-256</span>
+                      </div>
+                    </div>
+                  </div>
+                  
+                  <button 
+                    onClick={() => setCurrentView('terminal')}
+                    className="w-full bg-surface-container-highest border border-outline-variant text-on-surface font-headline font-black uppercase tracking-[0.2em] py-5 text-sm hover:border-primary transition-all flex items-center justify-center gap-2 rounded-xl"
+                  >
+                    <span className="material-symbols-outlined text-sm">arrow_back</span>
+                    Return to Terminal
+                  </button>
+                </div>
+              </div>
+            </section>
+          );
+        })()}
+
         {/* ── SYSTEM VIEW ─────────────────────────── */}
         {currentView === 'system' && (
           <section className="space-y-8 pb-32">
-            <div className="border-l-4 border-primary pl-8">
-              <span className="font-label text-[10px] uppercase tracking-[0.2em] text-outline block mb-2">Axiom Pipeline — System Diagnostics</span>
-              <h2 className="font-headline text-4xl font-black uppercase tracking-tighter text-on-surface">Node Registry</h2>
+            <div className="border-l-4 border-primary pl-8 flex items-end justify-between">
+              <div>
+                <span className="font-label text-[10px] uppercase tracking-[0.2em] text-outline block mb-2">Axiom Pipeline — System Diagnostics</span>
+                <h2 className="font-headline text-4xl font-black uppercase tracking-tighter text-on-surface">Node Registry</h2>
+              </div>
+              <button 
+                onClick={fetchCache}
+                className="text-[9px] font-label uppercase text-primary tracking-widest border border-primary/30 px-4 py-2 hover:bg-primary/10 transition-all flex items-center gap-2"
+              >
+                <span className="material-symbols-outlined text-xs">sync</span> Refresh Cache
+              </button>
+            </div>
+
+            {/* ── AXIOM INTELLIGENCE (CACHE MONITOR) ── */}
+            <div className="bg-surface-container-low border border-outline-variant/30 p-8 space-y-8 shadow-panel rounded-2xl">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 bg-primary/10 flex items-center justify-center border border-primary/20">
+                    <span className="material-symbols-outlined text-primary text-xl">psychology</span>
+                  </div>
+                  <div>
+                    <h3 className="font-headline font-bold uppercase tracking-widest text-xs text-on-surface">Axiom Intelligence</h3>
+                    <p className="text-outline text-[10px] uppercase tracking-wider">Top 5 Instant-Response Latency Profiles</p>
+                  </div>
+                </div>
+                <span className="text-[9px] font-black uppercase tracking-widest px-3 py-1 border text-primary border-primary/40 bg-primary/5">
+                  LRU ACTIVE
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                {cachedReports.map((entry, idx) => (
+                  <div key={idx} className="bg-surface-container border border-outline-variant/20 p-6 flex flex-col justify-between group hover:border-primary/40 transition-all rounded-2xl">
+                    <div className="space-y-4">
+                      <div className="flex justify-between items-start">
+                        <span className="text-[9px] font-mono text-outline uppercase tracking-tighter">Report ID :: {entry.report.totalClaims}C-{Math.floor(entry.report.overallTrustScore)}</span>
+                        <div className="w-2 h-2 bg-[#00ff88] rounded-full shadow-[0_0_8px_#00ff88]"></div>
+                      </div>
+                      <p className="text-xs font-medium text-on-surface leading-normal line-clamp-3 italic">"{entry.query}"</p>
+                      
+                      <div className="flex items-center gap-3">
+                        <div className="flex-1 h-1 bg-surface-container-highest">
+                          <div className="h-full bg-primary" style={{ width: `${entry.report.overallTrustScore}%` }}></div>
+                        </div>
+                        <span className="text-[10px] font-black text-primary">{Math.round(entry.report.overallTrustScore)}%</span>
+                      </div>
+                    </div>
+
+                    <button 
+                      onClick={() => {
+                        setReportData(entry.report);
+                        setStep('complete');
+                        setCurrentView('nodes');
+                      }}
+                      className="mt-6 w-full py-2 bg-primary/5 border border-primary/20 text-primary text-[10px] font-black uppercase tracking-[0.2em] hover:bg-primary hover:text-white transition-all"
+                    >
+                      Instant Load
+                    </button>
+                  </div>
+                ))}
+                {cachedReports.length === 0 && (
+                  <div className="col-span-full py-12 text-center border border-dashed border-outline-variant/30 text-outline text-[11px] uppercase tracking-widest">
+                    Intelligence memory empty. Perform searches to populate cache.
+                  </div>
+                )}
+              </div>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+
               {[
                 { icon: 'smart_toy', label: 'AI Inference Engine', status: 'ONLINE', sub: 'Google Gemini 2.0 Flash · Groq Fallback Active', ok: true },
                 { icon: 'travel_explore', label: 'Evidence Retrieval', status: 'ONLINE', sub: 'Wikipedia Open API · No rate limits', ok: true },
                 { icon: 'storage', label: 'Local History Ledger', status: 'ACTIVE', sub: 'Browser LocalStorage · Encrypted', ok: true },
                 { icon: 'key', label: 'API Authentication', status: 'CONFIGURED', sub: 'GEMINI_API_KEY loaded from .env.local', ok: true },
               ].map(card => (
-                <div key={card.label} className={`bg-surface-container-low p-6 border ${card.ok ? 'border-primary/20' : 'border-error/30'}`}>
+                <div key={card.label} className={`bg-surface-container-low p-6 border rounded-2xl ${card.ok ? 'border-primary/20' : 'border-error/30'}`}>
                   <div className="flex items-center justify-between mb-4">
                     <div className="flex items-center gap-3">
-                      <div className="w-10 h-10 bg-surface-container flex items-center justify-center border border-outline-variant/20">
+                      <div className="w-10 h-10 bg-surface-container flex items-center justify-center border border-outline-variant/20 rounded-xl">
                         <span className="material-symbols-outlined text-primary text-xl">{card.icon}</span>
                       </div>
                       <span className="font-headline font-bold uppercase text-xs tracking-widest text-on-surface">{card.label}</span>
                     </div>
-                    <span className={`text-[9px] font-black uppercase tracking-widest px-3 py-1 border ${card.ok ? 'text-[#00ff88] border-[#00ff88] bg-[#00ff88]/5' : 'text-error border-error/40'}`}>
+                    <span className={`text-[9px] font-black uppercase tracking-widest px-3 py-1 border rounded-full ${card.ok ? 'text-[#00ff88] border-[#00ff88] bg-[#00ff88]/5' : 'text-error border-error/40'}`}>
                       {card.status}
                     </span>
                   </div>
@@ -768,7 +1274,7 @@ export default function Home() {
               ))}
             </div>
 
-            <div className="bg-surface-container-low border border-outline-variant/20 p-8 space-y-4">
+            <div className="bg-surface-container-low border border-outline-variant/20 p-8 space-y-4 rounded-2xl">
               <h3 className="font-headline font-bold uppercase tracking-widest text-xs text-on-surface">Pipeline Architecture</h3>
               {[
                 '01 → User submits text or URL to /api/factcheck',
@@ -780,7 +1286,7 @@ export default function Home() {
                 '07 → Related follow-up questions built from topic analysis',
                 '08 → Result saved to local ledger for archive',
               ].map((s, i) => (
-                <div key={i} className="flex gap-4 items-start p-3 bg-surface-container border-l-2 border-primary/20 hover:border-primary/60 transition-all">
+                <div key={i} className="flex gap-4 items-start p-3 bg-surface-container border-l-2 border-primary/20 hover:border-primary/60 transition-all rounded-xl">
                   <span className="text-primary font-mono text-[10px] shrink-0 mt-0.5">{s.substring(0, 2)}</span>
                   <span className="text-on-surface-variant text-xs">{s.substring(5)}</span>
                 </div>

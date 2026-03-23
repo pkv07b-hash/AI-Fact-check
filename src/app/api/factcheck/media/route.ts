@@ -74,6 +74,7 @@ export async function POST(request: Request) {
         extractedText: mediaResult.extractedText,
         hasManipulationSignals: mediaResult.hasManipulationSignals,
         manipulationDetails: mediaResult.manipulationDetails,
+        detections: mediaResult.detections,
       },
     });
   } catch (error) {

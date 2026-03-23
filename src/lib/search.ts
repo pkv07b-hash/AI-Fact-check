@@ -195,11 +195,11 @@ function rankSearchResults(claim: string, results: SearchResult[]): SearchResult
   return [...results].sort((a, b) => scoreAgainstClaim(claim, b) - scoreAgainstClaim(claim, a));
 }
 
-async function wikiSearchOnce(query: string): Promise<SearchResult[]> {
+async function wikiSearchOnce(query: string, timeoutMs: number = 6_000): Promise<SearchResult[]> {
   // Use srlimit=4 (we usually only keep top 2-3 anyway) to reduce payload
   const url = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(query)}&utf8=&format=json&srlimit=4&origin=*`;
-  // Tighten timeout to 6 seconds so we fail fast if Wiki is struggling
-  const response = await fetch(url, { signal: AbortSignal.timeout(6_000) });
+  // Dynamic timeout for Quick vs Deep
+  const response = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
   if (!response.ok) return [];
   const data = await response.json();
   const list = data?.query?.search;
@@ -257,9 +257,11 @@ async function scrapeUrl(url: string): Promise<string> {
   }
 }
 
-export async function retrieveEvidence(claims: ExtractedClaim[]): Promise<ClaimEvidence[]> {
+export async function retrieveEvidence(claims: ExtractedClaim[], mode: 'quick' | 'deep' = 'deep'): Promise<ClaimEvidence[]> {
+  const isQuick = mode === 'quick';
   const evidencePromises = claims.map(async (claim) => {
-    const queries = buildWikipediaSearchQueries(claim.claim);
+    let queries = buildWikipediaSearchQueries(claim.claim);
+    if (isQuick) queries = queries.slice(0, 1); // Aggressive query culling for 20s target
     const byKey = new Map<string, SearchResult>();
 
     console.log(`\n[SEARCH] Claim ID: ${claim.id}`);
@@ -268,7 +270,7 @@ export async function retrieveEvidence(claims: ExtractedClaim[]): Promise<ClaimE
 
     // 🔥 SPEED OPTIMIZATION: Run all Wikipedia searches for this claim in PARALLEL
     const resultsBatches = await Promise.allSettled(
-      queries.map((q) => wikiSearchOnce(q))
+      queries.map((q) => wikiSearchOnce(q, isQuick ? 2000 : 8000))
     );
 
     for (const res of resultsBatches) {
@@ -309,11 +311,11 @@ export async function retrieveEvidence(claims: ExtractedClaim[]): Promise<ClaimE
       if (positive.length > 0) merged = positive;
     }
 
-    // ── Wikipedia results (top 2) ─────────────────────────────────────────────
-    const wikiResults = merged.slice(0, 2);
+    // ── Wikipedia results (top 2 or top 1 if Quick) ─────────────────────────────
+    const wikiResults = merged.slice(0, isQuick ? 1 : 2);
     
     // ── Deep Web Scraping (Enhance the top Wikipedia result or top link) ──
-    if (wikiResults.length > 0) {
+    if (wikiResults.length > 0 && !isQuick) {
       const primaryUrl = wikiResults[0].url;
       const deepContent = await scrapeUrl(primaryUrl);
       if (deepContent.length > 300) {
@@ -356,7 +358,7 @@ export async function retrieveEvidence(claims: ExtractedClaim[]): Promise<ClaimE
     // ── Tavily AI Search (real article content, optional) ─────────────────────
     let tavilyResults: SearchResult[] = [];
     const tavilyKey = process.env.TAVILY_API_KEY?.trim();
-    if (tavilyKey) {
+    if (tavilyKey && !isQuick) {
       try {
         console.log(`[SEARCH] Running Tavily search for: "${newsQuery}"`);
         const { tavily } = await import("@tavily/core");
@@ -385,11 +387,45 @@ export async function retrieveEvidence(claims: ExtractedClaim[]): Promise<ClaimE
       }
     }
 
-    // ── Merge: Wikipedia first, then Tavily, then news links (up to 5 total) ─
-    const allResults: SearchResult[] = [...wikiResults, ...tavilyResults, ...newsResults];
+    // ── X (Twitter) & YouTube Search Links ────────────────────────────────────
+    const xResult: SearchResult = {
+      url: `https://twitter.com/search?q=${encodeURIComponent(newsQuery)}`,
+      title: `X (Twitter) — Search: "${newsQuery.slice(0, 40)}"`,
+      snippet: "Search X for real-time posts and verified accounts."
+    };
+
+    const ytResult: SearchResult = {
+      url: `https://www.youtube.com/results?search_query=${encodeURIComponent(newsQuery)}`,
+      title: `YouTube — Search: "${newsQuery.slice(0, 40)}"`,
+      snippet: "Search YouTube for video evidence and news coverage."
+    };
+
+    // ── Structural Merge: Wiki -> News -> Web/X -> YouTube ────────────────────
+    const finalResults: SearchResult[] = [];
+    
+    // Slot 1: Wikipedia (Must be first)
+    if (wikiResults.length > 0) finalResults.push(wikiResults[0]);
+    
+    // Slot 2: News Source (Must be in middle)
+    if (newsResults.length > 0) finalResults.push(newsResults[0]);
+    
+    // Slot 3: Web Page / Tavily (Middle)
+    if (tavilyResults.length > 0) {
+      finalResults.push(tavilyResults[0]);
+    } else if (newsResults.length > 1) {
+      finalResults.push(newsResults[1]);
+    }
+
+    // Slot 4: X / Twitter (Optional/Middle)
+    finalResults.push(xResult);
+    
+    // Slot 5: YouTube Video (Must be last)
+    finalResults.push(ytResult);
+
     const primaryQuery = queries[0] ?? claim.claim;
 
-    let results = allResults.slice(0, 5);
+    // Cap at 2 for Quick, 5 for Deep
+    let results = finalResults.slice(0, isQuick ? 2 : 5);
 
     if (results.length === 0) {
       console.warn(`[SEARCH] ⚠️ No evidence for: "${claim.claim}"`);

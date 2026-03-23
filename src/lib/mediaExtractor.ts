@@ -8,6 +8,12 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 
 export type MediaKind = "image" | "video";
 
+export interface Detection {
+  label: string;
+  /** [ymin, xmin, ymax, xmax] normalized 0-1000 */
+  box_2d: [number, number, number, number];
+}
+
 export interface MediaExtractionResult {
   /** Raw text/transcript extracted from the media */
   extractedText: string;
@@ -17,6 +23,8 @@ export interface MediaExtractionResult {
   hasManipulationSignals: boolean;
   /** Manipulation signal details if detected */
   manipulationDetails?: string;
+  /** List of prominent objects detected in the scene */
+  detections?: Detection[];
 }
 
 /** Max file size: 20 MB for images, 50 MB for short videos */
@@ -90,11 +98,16 @@ Analyze this ${mediaLabel} and respond with a JSON object (no markdown, no backt
   "extractedText": "<all visible text, captions, headlines, subtitles, or spoken words you can identify — preserve them exactly>",
   "mediaSummary": "<1–2 sentences describing what this ${mediaLabel} shows, who/what is depicted>",
   "hasManipulationSignals": <true or false>,
-  "manipulationDetails": "<if hasManipulationSignals is true, describe the signals: e.g. inconsistent lighting, deepfake artifacts, overlaid text contradicting context, etc. Otherwise empty string>"
+  "manipulationDetails": "<if hasManipulationSignals is true, describe the signals in detail>",
+  "detections": [
+    { "label": "object name", "box_2d": [ymin, xmin, ymax, xmax] },
+    ...
+  ]
 }
 
+Note: box_2d coordinate values must be normalized to 0-1000.
 If no text is visible or audible, set extractedText to a description of the key visual claims (e.g. "Image shows a chart claiming X grew by 300%").
-Be thorough with text extraction — every headline, caption, and on-screen statistic matters for fact-checking.`;
+Be thorough with text extraction and object detection — every headline and prominent entity matters for forensic fact-checking.`;
 
   let raw = "";
 
@@ -167,6 +180,7 @@ Be thorough with text extraction — every headline, caption, and on-screen stat
       mediaSummary: parsed.mediaSummary ?? "No summary available.",
       hasManipulationSignals: parsed.hasManipulationSignals ?? false,
       manipulationDetails: parsed.manipulationDetails || undefined,
+      detections: parsed.detections || [],
     };
   } catch {
     console.error("[MEDIA] Failed to parse JSON, using raw text as extractedText");
