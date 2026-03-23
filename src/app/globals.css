@@ -326,3 +326,46 @@ a[target="_blank"] {
   width: 100%;
   max-width: 800px;
 }
+
+/* ── Premium Aesthetic Utilities ────────────────────────────────────────── */
+@keyframes gradient-sweep {
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+.animate-gradient-sweep {
+  background-size: 200% 200%;
+  animation: gradient-sweep 4s ease infinite;
+}
+
+@keyframes pulse-glow {
+  0% { box-shadow: 0 0 10px var(--accent-blue); filter: brightness(1); }
+  50% { box-shadow: 0 0 30px var(--accent-purple), 0 0 10px var(--accent-blue); filter: brightness(1.2); }
+  100% { box-shadow: 0 0 10px var(--accent-blue); filter: brightness(1); }
+}
+
+.animate-pulse-glow {
+  animation: pulse-glow 3s infinite;
+}
+
+@keyframes float {
+  0% { transform: translateY(0px); }
+  50% { transform: translateY(-8px); }
+  100% { transform: translateY(0px); }
+}
+
+.animate-float {
+  animation: float 4s ease-in-out infinite;
+}
+
+@keyframes water-sweep {
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+.animate-water-sweep {
+  background-size: 300% 300%;
+  animation: water-sweep 6s ease-in-out infinite;
+}

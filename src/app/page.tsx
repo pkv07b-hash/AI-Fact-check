@@ -66,6 +66,7 @@ export default function Home() {
   const [reportData, setReportData] = useState<AccuracyReport | null>(null);
   const [mediaAnalysis, setMediaAnalysis] = useState<MediaAnalysis | null>(null);
   const [errorMsg, setErrorMsg] = useState("");
+  const [successMsg, setSuccessMsg] = useState("");
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [currentView, setCurrentView] = useState<ViewTab>('terminal');
   const [inputMode, setInputMode] = useState<InputMode>('text');
@@ -76,6 +77,11 @@ export default function Home() {
   const [pipelineProgress, setPipelineProgress] = useState(0);
   const [cachedReports, setCachedReports] = useState<{query: string, report: AccuracyReport}[]>([]);
   const [isListening, setIsListening] = useState(false);
+  const [isLoggedIn, setIsLoggedIn] = useState(true);
+  const [userReports, setUserReports] = useState<{topic?: string, timestamp: string, text: string}[]>([]);
+  const [isReporting, setIsReporting] = useState(false);
+  const [reportText, setReportText] = useState("");
+  const [expandedReport, setExpandedReport] = useState<number | null>(null);
   const recognitionRef = useRef<any>(null);
 
   const isProcessing = step !== 'idle' && step !== 'complete' && step !== 'error';
@@ -157,17 +163,31 @@ export default function Home() {
   }, [themeMode]);
 
   useEffect(() => {
-    const saved = localStorage.getItem("factcheck_history");
+    const saved = localStorage.getItem("user_reports");
+    if (saved) {
+      try { setUserReports(JSON.parse(saved)); } catch {}
+    }
+  }, []);
+
+  useEffect(() => {
+    const key = isLoggedIn ? "factcheck_history" : "factcheck_history_guest";
+    const saved = localStorage.getItem(key);
     if (saved) {
       try { setHistory(JSON.parse(saved)); } catch {}
     } else {
-      setHistory([
-        { timestamp: "2026-03-21 14:22", claim: "ISRO Mars Mission launch date rescheduled...", score: 88, outcome: "Substantiated" },
-        { timestamp: "2026-03-20 12:05", claim: "Stock market crash imminent says unverified...", score: 12, outcome: "Flagged" },
-        { timestamp: "2026-03-19 21:40", claim: "New AI regulations passed by the EU council...", score: 89, outcome: "Verified" },
-      ]);
+      if (isLoggedIn) {
+        setHistory([
+          { timestamp: "2026-03-21 14:22", claim: "ISRO Mars Mission launch date rescheduled...", score: 88, outcome: "Substantiated" },
+          { timestamp: "2026-03-20 12:05", claim: "Stock market crash imminent says unverified...", score: 12, outcome: "Flagged" },
+          { timestamp: "2026-03-19 21:40", claim: "New AI regulations passed by the EU council...", score: 89, outcome: "Verified" },
+        ]);
+      } else {
+        setHistory([
+          { timestamp: "2026-03-24 10:00", claim: "Global stock markets reach record highs...", score: 65, outcome: "Substantiated" },
+        ]);
+      }
     }
-  }, []);
+  }, [isLoggedIn]);
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0] ?? null;
@@ -226,7 +246,8 @@ export default function Home() {
         outcome
       };
       const newHistory = [newItem, ...prev].slice(0, 20);
-      localStorage.setItem("factcheck_history", JSON.stringify(newHistory));
+      const key = isLoggedIn ? "factcheck_history" : "factcheck_history_guest";
+      localStorage.setItem(key, JSON.stringify(newHistory));
       return newHistory;
     });
   };
@@ -281,6 +302,35 @@ export default function Home() {
       setIsListening(true);
     } catch (err) {
       console.error(err);
+    }
+  };
+
+  const handleShare = async () => {
+    if (!reportData) return;
+    const shareUrl = window.location.href;
+    const shareTitle = `Axiom Analysis :: ${reportData.totalClaims} Claims Verified`;
+    const shareText = `Check out this fact-check report on Axiom: "${reportData.globalConclusion?.replace(/<\/?[^>]+(>|$)/g, "").slice(0, 100)}..."`;
+
+    if (navigator.share) {
+      try {
+        await navigator.share({
+          title: shareTitle,
+          text: shareText,
+          url: shareUrl,
+        });
+      } catch (err) {
+        if ((err as Error).name !== 'AbortError') {
+          console.error("Error sharing:", err);
+        }
+      }
+    } else {
+      try {
+        await navigator.clipboard.writeText(shareUrl);
+        setSuccessMsg("Link copied to clipboard!");
+        setTimeout(() => setSuccessMsg(""), 3000);
+      } catch (err) {
+        console.error("Error copying:", err);
+      }
     }
   };
 
@@ -390,7 +440,7 @@ export default function Home() {
             }`}
           >
             <img 
-              src="/profile_pravin.jpg" 
+              src={isLoggedIn ? "/profile_pravin.jpg" : "https://www.gravatar.com/avatar/00000000000000000000000000000000?d=mp&f=y"} 
               alt="Profile" 
               className="w-full h-full object-cover"
               onError={(e) => {
@@ -410,8 +460,8 @@ export default function Home() {
           <>
             {/* Hero Section */}
             <section className="relative">
-              <div className="absolute -top-4 md:-top-12 -left-4 md:-left-12 text-primary opacity-10 select-none pointer-events-none hidden sm:block">
-                <span className="text-7xl md:text-[12rem] font-headline font-black leading-none tracking-tighter uppercase">VERIFY</span>
+              <div className="absolute -top-4 md:-top-12 -left-4 md:-left-12 text-primary opacity-20 select-none pointer-events-none hidden sm:block mix-blend-screen">
+                <span className="text-7xl md:text-[12rem] font-headline font-black leading-none tracking-tighter uppercase animate-pulse-glow">VERIFY</span>
               </div>
               <div className="flex flex-col md:flex-row items-start gap-8 md:gap-12 relative z-10">
                 {/* Left Copy */}
@@ -441,7 +491,7 @@ export default function Home() {
                 </div>
 
                 {/* Input Card (Asymmetric) */}
-                <div className="md:w-2/5 w-full bg-surface-container-high p-1 glass-panel asymmetric-tilt-right mt-12 md:mt-0 shadow-panel rounded-3xl border-l-4 border-primary shadow-[inset_6px_0_15px_-6px_rgba(183,196,255,0.5)]">
+                <div className="md:w-2/5 w-full bg-surface-container-high p-1 glass-panel asymmetric-tilt-right mt-12 md:mt-0 shadow-panel rounded-3xl border-l-4 border-primary shadow-[inset_6px_0_15px_-6px_rgba(183,196,255,0.5)] animate-float">
                   <div className="bg-surface-container-lowest border border-outline-variant/20 rounded-[1.3rem] overflow-hidden">
                     {/* Mode Toggle */}
                     <div className="flex border-b border-outline-variant/20">
@@ -463,7 +513,7 @@ export default function Home() {
 
                     {inputMode === 'text' ? (
                       <div className="p-8 space-y-6">
-                        <div className="space-y-2">
+                        <div className="space-y-2 relative">
                           <label className="font-label text-[10px] uppercase tracking-[0.2em] text-primary block">Source Analysis Input</label>
                           <textarea
                             className="w-full border border-outline-variant/40 focus:border-primary focus:ring-1 focus:ring-primary/20 placeholder:text-outline/30 min-h-[120px] resize-none p-4 font-body text-sm rounded-xl transition-all"
@@ -471,6 +521,9 @@ export default function Home() {
                             placeholder="Paste claim, URL, or metadata hash..."
                             value={input}
                             onChange={e => setInput(e.target.value)}
+                            spellCheck="true"
+                            autoCorrect="on"
+                            autoComplete="on"
                             disabled={isProcessing}
                           />
                         </div>
@@ -498,10 +551,10 @@ export default function Home() {
                             type="button" 
                             onClick={(e) => handleAnalyze(undefined, undefined, 'deep')}
                             disabled={!input.trim() || isProcessing}
-                            className="flex-1 bg-gradient-to-r from-primary to-primary-container text-[#030e22] font-headline font-black uppercase tracking-[0.2em] py-5 text-sm hover:brightness-125 active:scale-95 transition-all shadow-glow hover:shadow-glow-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 rounded-xl"
+                            className="flex-1 w-full bg-[linear-gradient(110deg,#0a0a0c,#1f2a3f,#2a3b5c,#1f2a3f,#0a0a0c)] text-white font-headline font-black tracking-widest py-4 text-xl md:text-2xl hover:brightness-125 active:scale-95 transition-all shadow-[0_4px_20px_rgba(0,0,0,0.5)] border border-outline-variant/30 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-3 rounded-xl animate-water-sweep h-[60px]"
                           >
-                            <span className="material-symbols-outlined text-sm">travel_explore</span>
-                            {isProcessing ? 'RESEARCHING...' : 'Deep Research'}
+                            <span className="material-symbols-outlined text-[1.2em]">travel_explore</span>
+                            {isProcessing ? 'Verifying...' : 'VerifyNow!!!'}
                           </button>
                         </div>
                       </div>
@@ -651,11 +704,18 @@ export default function Home() {
               </div>
             </section>
 
-            {/* Error Banner */}
+            {/* Notification Banners */}
             {errorMsg && (
-              <div className="border border-error bg-error/5 p-6 flex items-center gap-4 rounded-xl">
+              <div className="border border-error bg-error/5 p-6 flex items-center gap-4 rounded-xl animate-in fade-in slide-in-from-top-4 duration-300">
                 <span className="material-symbols-outlined text-error text-3xl">warning</span>
                 <p className="text-error font-label text-sm uppercase tracking-wider">{errorMsg}</p>
+              </div>
+            )}
+
+            {successMsg && (
+              <div className="border border-[#00ff88]/30 bg-[#00ff88]/5 p-6 flex items-center gap-4 rounded-xl animate-in fade-in slide-in-from-top-4 duration-300">
+                <span className="material-symbols-outlined text-[#00ff88] text-3xl">check_circle</span>
+                <p className="text-[#00ff88] font-label text-sm uppercase tracking-wider">{successMsg}</p>
               </div>
             )}
 
@@ -708,12 +768,22 @@ export default function Home() {
                 <span className="font-label text-[10px] uppercase tracking-[0.2em] text-outline block mb-2">Axiom Pipeline — Node Analysis</span>
                 <h2 className="font-headline text-4xl font-black uppercase tracking-tighter text-on-surface">Verification Report</h2>
               </div>
-              <button 
-                onClick={() => { setReportData(null); setMediaAnalysis(null); setInput(""); setStep("idle"); setCurrentView("terminal"); }}
-                className="border border-outline-variant text-outline hover:text-on-surface hover:border-primary font-label text-[10px] uppercase tracking-widest px-4 py-2 transition-all flex items-center gap-2"
-              >
-                <span className="material-symbols-outlined text-sm">restart_alt</span> New Stream
-              </button>
+              <div className="flex items-center gap-3">
+                <button 
+                  onClick={handleShare}
+                  disabled={!reportData}
+                  title="Share Analysis"
+                  className="w-10 h-10 rounded-full border border-primary/30 bg-primary/5 text-primary hover:border-primary hover:bg-primary/10 hover:shadow-[0_0_15px_rgba(183,196,255,0.3)] transition-all flex items-center justify-center disabled:opacity-30 disabled:cursor-not-allowed group"
+                >
+                  <span className="material-symbols-outlined text-sm group-hover:scale-110 transition-transform">share</span>
+                </button>
+                <button 
+                  onClick={() => { setReportData(null); setMediaAnalysis(null); setInput(""); setStep("idle"); setCurrentView("terminal"); }}
+                  className="border border-outline-variant text-outline hover:text-on-surface hover:border-primary font-label text-[10px] uppercase tracking-widest px-4 py-2 transition-all flex items-center gap-2"
+                >
+                  <span className="material-symbols-outlined text-sm">restart_alt</span> New Stream
+                </button>
+              </div>
             </div>
 
             {!reportData ? (
@@ -792,10 +862,11 @@ export default function Home() {
                 {/* Score Ring + Summary */}
                 <div className="grid grid-cols-1 md:grid-cols-12 gap-4">
                   {/* Circular Score */}
-                  <div className="md:col-span-4 bg-surface-container-low p-8 border border-outline-variant/20 flex flex-col items-center justify-center space-y-6 rounded-2xl">
-                    <span className="font-label text-[10px] uppercase tracking-[0.2em] text-outline">Inference Score</span>
-                    <div className="relative flex items-center justify-center">
-                      <svg className="w-44 h-44 transform -rotate-90">
+                  <div className="md:col-span-4 bg-surface-container-low p-8 border border-outline-variant/20 flex flex-col items-center justify-center space-y-6 rounded-2xl relative overflow-hidden group">
+                    <div className="absolute inset-0 bg-gradient-to-br from-primary/10 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-700"></div>
+                    <span className="font-label text-[10px] uppercase tracking-[0.2em] text-outline relative z-10">Inference Score</span>
+                    <div className="relative flex items-center justify-center w-48 h-48 rounded-full animate-pulse-glow bg-surface-container-highest/50">
+                      <svg className="w-44 h-44 transform -rotate-90 filter drop-shadow-[0_0_8px_rgba(59,130,246,0.5)]">
                         <circle className="text-surface-container-highest" cx="88" cy="88" fill="transparent" r="80" stroke="currentColor" strokeWidth="6"/>
                         <circle className="text-primary" cx="88" cy="88" fill="transparent" r="80" stroke="currentColor"
                           strokeDasharray="502.65"
@@ -805,7 +876,7 @@ export default function Home() {
                       </svg>
                       <div className="absolute inset-0 flex flex-col items-center justify-center">
                         <span className="text-4xl font-headline font-black text-on-surface">{reportData.overallTrustScore}<span className="text-lg text-primary">%</span></span>
-                        <span className="text-[9px] font-label text-primary uppercase tracking-tighter mt-1">
+                        <span className="text-[9px] font-label text-primary uppercase tracking-tighter mt-1 drop-shadow-[0_0_5px_rgba(59,130,246,0.8)]">
                           {reportData.overallTrustScore > 75 ? 'Verified' : reportData.overallTrustScore > 40 ? 'Mixed Signal' : 'Flagged'}
                         </span>
                       </div>
@@ -830,8 +901,8 @@ export default function Home() {
                       const isTrue = claim.status === 'True';
                       const isFalse = claim.status === 'False';
                       return (
-                        <div key={idx} className={`p-6 border bg-surface-container-lowest rounded-2xl border-l-4 shadow-[inset_6px_0_15px_-6px_rgba(183,196,255,0.3)] ${
-                          isFalse ? 'border-l-error border-error/40' : isTrue ? 'border-l-primary border-primary/30' : 'border-l-outline-variant border-outline-variant/20'
+                        <div key={idx} className={`p-6 border bg-surface-container-lowest rounded-2xl border-l-4 shadow-[inset_6px_0_15px_-6px_rgba(183,196,255,0.3)] hover:-translate-y-1 transition-all duration-300 ${
+                          isFalse ? 'border-l-error border-error/40 hover:shadow-[0_4px_20px_rgba(239,68,68,0.15)]' : isTrue ? 'border-l-primary border-primary/30 hover:shadow-[0_4px_20px_rgba(59,130,246,0.15)]' : 'border-l-outline-variant border-outline-variant/20 hover:shadow-[0_4px_20px_rgba(255,255,255,0.05)]'
                         }`}>
                           <div className="flex items-start justify-between gap-4 mb-4">
                             <div className="space-y-1">
@@ -971,6 +1042,99 @@ export default function Home() {
                     </div>
                   </div>
                 )}
+
+                {/* All Sources / Bibliography */}
+                {reportData.verifiedClaims && reportData.verifiedClaims.length > 0 && (() => {
+                  const allSources = reportData.verifiedClaims.flatMap(c => c.evidence?.results || []);
+                  const uniqueSources = Array.from(new Map(allSources.map(s => [s.url, s])).values());
+                  
+                  if (uniqueSources.length === 0) return null;
+
+                  return (
+                    <div className="space-y-6 pt-8 mt-4 border-t border-outline-variant/20">
+                      <div className="flex items-center gap-3">
+                        <span className="material-symbols-outlined text-outline">link</span>
+                        <h3 className="font-headline font-bold uppercase tracking-widest text-xs text-on-surface">Source Bibliography</h3>
+                      </div>
+                      <div className="flex flex-wrap gap-3">
+                        {uniqueSources.map((ev, idx) => {
+                          const domain = (() => { try { return new URL(ev.url).hostname.replace(/^www\./, ''); } catch { return 'source'; } })();
+                          const faviconUrl = `https://www.google.com/s2/favicons?domain=${domain}&sz=32`;
+                          return (
+                            <a key={idx} href={ev.url} target="_blank" rel="noreferrer"
+                              title={ev.title}
+                              className="flex items-center gap-2 px-3 py-2 bg-surface-container-low border border-outline-variant/30 text-outline hover:text-primary hover:border-primary/50 transition-all rounded-xl text-xs font-medium group">
+                              {/* eslint-disable-next-line @next/next/no-img-element */}
+                              <img
+                                src={faviconUrl}
+                                alt={domain}
+                                width={16}
+                                height={16}
+                                className="w-4 h-4 rounded-sm opacity-80 group-hover:opacity-100 transition-opacity flex-shrink-0"
+                                onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                              />
+                              <span className="truncate max-w-[120px]">{domain}</span>
+                            </a>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                {/* ── REPORT BUTTON / FORM ──────────────── */}
+                <div className="flex justify-end pt-8 mt-4 border-t border-outline-variant/10">
+                  {!isReporting ? (
+                    <button 
+                      onClick={() => setIsReporting(true)}
+                      className="flex items-center gap-2 px-4 py-2 border border-error/40 text-error hover:bg-error/10 hover:border-error transition-all rounded-xl text-xs font-bold uppercase tracking-widest"
+                    >
+                      <span className="material-symbols-outlined text-sm">flag</span>
+                      Report Feedback
+                    </button>
+                  ) : (
+                    <div className="w-full md:w-1/2 bg-surface-container-low border border-error/20 p-4 rounded-2xl flex flex-col gap-3 animate-in fade-in slide-in-from-bottom-2">
+                      <div className="flex flex-col gap-1 relative">
+                        <label className="text-[10px] uppercase tracking-widest font-bold text-error">Submit Feedback</label>
+                        <textarea 
+                          value={reportText}
+                          onChange={(e) => setReportText(e.target.value)}
+                          spellCheck="true"
+                          autoCorrect="on"
+                          autoComplete="on"
+                          placeholder="Type your review or report about the result..."
+                          className="w-full bg-surface-container-highest border border-outline-variant/30 rounded-xl p-3 text-sm text-on-surface placeholder:text-outline focus:outline-none focus:border-error/50 min-h-[100px] resize-y"
+                        />
+                      </div>
+                      <div className="flex justify-end gap-2">
+                        <button 
+                          onClick={() => { setIsReporting(false); setReportText(""); }}
+                          className="px-4 py-2 text-xs font-bold uppercase tracking-widest text-outline hover:text-on-surface transition-colors"
+                        >
+                          Cancel
+                        </button>
+                        <button 
+                          onClick={() => {
+                            if (!reportText.trim()) return;
+                            const newReport = {
+                              topic: input.trim() || selectedFile?.name || "General Feedback",
+                              timestamp: new Date().toLocaleString('sv-SE', { hour12: false }).substring(0, 16),
+                              text: reportText.trim()
+                            };
+                            const updated = [newReport, ...userReports];
+                            setUserReports(updated);
+                            localStorage.setItem("user_reports", JSON.stringify(updated));
+                            setIsReporting(false);
+                            setReportText("");
+                          }}
+                          className="px-4 py-2 text-xs font-bold uppercase tracking-widest bg-error/10 text-error border border-error/30 hover:bg-error hover:text-white transition-colors rounded-lg"
+                        >
+                          Submit Report
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
               </>
             )}
           </section>
@@ -984,7 +1148,7 @@ export default function Home() {
                 <span className="font-label text-[10px] uppercase tracking-[0.2em] text-outline block mb-2">Axiom Pipeline — Registry</span>
                 <h2 className="font-headline text-4xl font-black uppercase tracking-tighter text-on-surface">Verification Ledger</h2>
               </div>
-              <button onClick={() => { localStorage.removeItem('factcheck_history'); setHistory([]); }}
+              <button onClick={() => { localStorage.removeItem(isLoggedIn ? 'factcheck_history' : 'factcheck_history_guest'); setHistory([]); }}
                 className="text-[9px] font-label uppercase text-error tracking-widest border border-error/30 px-4 py-2 hover:bg-error/10 transition-all">
                 Purge Logs
               </button>
@@ -1056,17 +1220,17 @@ export default function Home() {
                 <div className="absolute bottom-8 left-8 md:left-12 flex items-end gap-6">
                   <div className="w-32 h-32 md:w-44 md:h-44 bg-surface-container-lowest border-4 border-surface ring-1 ring-primary/20 shadow-glow rounded-full overflow-hidden flex items-center justify-center">
                     <img 
-                      src="/profile_pravin.jpg" 
-                      alt="Pravin Kumar" 
+                      src={isLoggedIn ? "/profile_pravin.jpg" : "https://www.gravatar.com/avatar/00000000000000000000000000000000?d=mp&f=y"} 
+                      alt={isLoggedIn ? "Pravin Kumar" : "Guest User"} 
                       className="w-full h-full object-cover"
                     />
                   </div>
                   <div className="pb-4">
                     <div className="flex flex-col mb-1">
-                      <span className="font-headline text-2xl font-black uppercase tracking-[0.3em] text-primary">NEWCOMERS</span>
-                      <span className="font-label text-[10px] uppercase tracking-[0.2em] text-outline font-bold">College: HIT Kolkata</span>
+                      <span className="font-headline text-2xl font-black uppercase tracking-[0.3em] text-primary">{isLoggedIn ? "NEWCOMERS" : "UNREGISTERED"}</span>
+                      <span className="font-label text-[10px] uppercase tracking-[0.2em] text-outline font-bold">{isLoggedIn ? "College: HIT Kolkata" : "Visitor"}</span>
                     </div>
-                    <h2 className="font-headline text-4xl md:text-6xl font-black uppercase tracking-tighter text-on-surface leading-none">Pravin Kumar</h2>
+                    <h2 className="font-headline text-4xl md:text-6xl font-black uppercase tracking-tighter text-on-surface leading-none">{isLoggedIn ? "Pravin Kumar" : "Guest User"}</h2>
                   </div>
                 </div>
               </div>
@@ -1110,7 +1274,8 @@ export default function Home() {
                   </div>
                 </div>
 
-                <div className="bg-surface-container-low border border-outline-variant/30 p-8 space-y-6 rounded-2xl">
+                <div className="flex flex-col gap-3">
+                  <div className="bg-surface-container-low border border-outline-variant/30 p-8 space-y-6 rounded-2xl">
                   <h3 className="font-headline font-bold uppercase tracking-widest text-xs text-on-surface flex items-center gap-2">
                     <span className="material-symbols-outlined text-primary text-sm">groups</span>
                     Squad Registry — Newcomers
@@ -1145,25 +1310,79 @@ export default function Home() {
                     </div>
                   </div>
                 </div>
+                
+                {/* User Reports */}
+                <div className="bg-surface-container-low border border-outline-variant/30 p-8 space-y-6 rounded-2xl flex flex-col h-full">
+                  <h3 className="font-headline font-bold uppercase tracking-widest text-xs text-on-surface flex items-center gap-2">
+                    <span className="material-symbols-outlined text-primary text-sm">forum</span>
+                    User Reports
+                  </h3>
+                  <div className="space-y-4 flex-1 overflow-y-auto max-h-[300px] pr-2 custom-scrollbar">
+                    {userReports.length > 0 ? userReports.map((r, i) => (
+                      <div 
+                        key={i} 
+                        onClick={() => setExpandedReport(expandedReport === i ? null : i)}
+                        className="bg-surface-container border border-error/20 p-4 rounded-xl space-y-3 group hover:border-error/40 transition-all cursor-pointer"
+                      >
+                        <div className="flex justify-between items-center">
+                          <div className="text-[9px] text-outline uppercase tracking-wider font-mono">
+                            {r.topic ? <span className="text-primary font-bold">{r.topic}</span> : 'Report'}
+                            <span className="opacity-50"> • {r.timestamp}</span>
+                          </div>
+                          <span 
+                            className="material-symbols-outlined text-outline text-sm transition-transform duration-300" 
+                            style={{ transform: expandedReport === i ? 'rotate(180deg)' : 'rotate(0deg)' }}
+                          >
+                            expand_more
+                          </span>
+                        </div>
+                        {expandedReport === i && (
+                          <div className="pt-3 border-t border-error/10 animate-in fade-in slide-in-from-top-1">
+                            <p className="text-xs text-on-surface leading-relaxed">{r.text}</p>
+                          </div>
+                        )}
+                      </div>
+                    )) : (
+                      <div className="py-12 text-center text-outline text-[10px] uppercase tracking-widest italic border border-dashed border-outline-variant/20 rounded-xl">No reports submitted.</div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex justify-end">
+                    <button 
+                      onClick={() => setIsLoggedIn(!isLoggedIn)}
+                      className={`font-headline font-bold uppercase tracking-[0.1em] py-2 px-6 text-xs transition-all flex items-center justify-center gap-2 rounded-lg border ${
+                        isLoggedIn 
+                          ? "bg-error/10 text-error border-error/30 hover:bg-error hover:text-white" 
+                          : "bg-[#00ff88]/10 text-[#00ff88] border-[#00ff88]/30 hover:bg-[#00ff88] hover:text-black"
+                      }`}
+                    >
+                      <span className="material-symbols-outlined text-sm">{isLoggedIn ? 'logout' : 'login'}</span>
+                      {isLoggedIn ? 'Log Out' : 'Log In'}
+                    </button>
+                  </div>
+                </div>
 
                 <div className="space-y-6">
-                  <div className="bg-primary/5 border border-primary/20 p-8 space-y-4 rounded-2xl">
-                    <h3 className="font-headline font-bold uppercase tracking-widest text-xs text-primary">System Credentials</h3>
-                    <div className="space-y-3">
-                      <div className="flex justify-between text-[11px]">
-                        <span className="text-outline">Access Tier:</span>
-                        <span className="text-primary font-black uppercase">Root Intelligence</span>
-                      </div>
-                      <div className="flex justify-between text-[11px]">
-                        <span className="text-outline">Verification Mode:</span>
-                        <span className="text-primary font-black uppercase">Multi-Agent Hybrid</span>
-                      </div>
-                      <div className="flex justify-between text-[11px]">
-                        <span className="text-outline">Encryption Status:</span>
-                        <span className="text-[#00ff88] font-black uppercase">Active AES-256</span>
+                  {isLoggedIn && (
+                    <div className="bg-primary/5 border border-primary/20 p-8 space-y-4 rounded-2xl">
+                      <h3 className="font-headline font-bold uppercase tracking-widest text-xs text-primary">System Credentials</h3>
+                      <div className="space-y-3">
+                        <div className="flex justify-between text-[11px]">
+                          <span className="text-outline">Access Tier:</span>
+                          <span className="text-primary font-black uppercase">Root Intelligence</span>
+                        </div>
+                        <div className="flex justify-between text-[11px]">
+                          <span className="text-outline">Verification Mode:</span>
+                          <span className="text-primary font-black uppercase">Multi-Agent Hybrid</span>
+                        </div>
+                        <div className="flex justify-between text-[11px]">
+                          <span className="text-outline">Encryption Status:</span>
+                          <span className="text-[#00ff88] font-black uppercase">Active AES-256</span>
+                        </div>
                       </div>
                     </div>
-                  </div>
+                  )}
                   
                   <button 
                     onClick={() => setCurrentView('terminal')}
@@ -1173,6 +1392,9 @@ export default function Home() {
                     Return to Terminal
                   </button>
                 </div>
+
+
+
               </div>
             </section>
           );

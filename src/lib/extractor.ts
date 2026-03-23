@@ -31,10 +31,9 @@ export async function extractClaims(input: string, mode: 'quick' | 'deep' = 'dee
 
   const prompt = new PromptTemplate({
     template: `You are an expert fact-checker. Extract distinct, verifiable factual claims from the provided text.
-    Only extract statements that can be objectively proven true or false using public sources.
-    If the input is a question, extract the underlying factual assertion or the primary subject whose status needs verification (e.g. "Who is the Prime Minister of India?" should be converted to a claim like "Identify the current Prime Minister of India and verify their identity").
-    Do NOT extract opinions, predictions, or subjective statements.
-    Preserve numbers, dates, and places. For famous people, you may normalize obvious spelling errors in names (e.g. Dipika Padukon → Deepika Padukone) so searches find the right topic.
+    Only extract statements that can be objectively proven or evaluated using public sources.
+    CRITICAL INSTRUCTION: DO NOT alter, normalize, or rephrase the wording of the user's input. If the input is a single question or statement, you MUST keep it exactly as written. Return the verbatim text provided unless it contains multiple distinct claims that absolutely must be split.
+    Provide the extracted claim exactly as it was written by the user. Make no grammatical fixes or declarative "improvements".
     ${mode === 'quick' ? 'Strictly limit to a maximum of 1-2 CORE claims for a high-speed verification scan.' : 'Limit to a maximum of 3 core claims even if the text is long (speed and quality).'}
     
     Text:
