@@ -29,18 +29,32 @@ export async function extractClaims(input: string, mode: 'quick' | 'deep' = 'dee
       .describe("An array of extracted claims.")
   );
 
+  // Detect if this is a short user query vs a fetched article body
+  const isArticle = input.length > 300;
+
   const prompt = new PromptTemplate({
-    template: `You are an expert fact-checker. Extract distinct, verifiable factual claims from the provided text.
-    Only extract statements that can be objectively proven or evaluated using public sources.
-    CRITICAL INSTRUCTION: DO NOT alter, normalize, or rephrase the wording of the user's input. If the input is a single question or statement, you MUST keep it exactly as written. Return the verbatim text provided unless it contains multiple distinct claims that absolutely must be split.
-    Provide the extracted claim exactly as it was written by the user. Make no grammatical fixes or declarative "improvements".
-    ${mode === 'quick' ? 'Strictly limit to a maximum of 1-2 CORE claims for a high-speed verification scan.' : 'Limit to a maximum of 3 core claims even if the text is long (speed and quality).'}
+    template: isArticle
+      ? `You are an expert fact-checker analyzing content.
+    The input might contain a [CONTEXT/QUESTION] followed by [ARTICLE CONTENT TO VERIFY].
     
-    Text:
+    TASK: Extract the ${mode === 'quick' ? '1 MOST IMPORTANT' : '2-3 most important'} distinct, verifiable factual claims from the article.
+    If a [CONTEXT/QUESTION] is provided, prioritize extracting claims that directly help answer or verify that specific question.
+    
+    Article Text / Context:
     {input}
     
-    {format_instructions}
-    `,
+    {format_instructions}`
+      : `You are an expert fact-checker. The user has submitted a short query or statement to verify.
+    CRITICAL: Preserve the user's exact wording. Do NOT rephrase, reword, or convert questions into statements.
+    If it is a single question or statement, return it EXACTLY as written as one claim.
+    Only split into multiple claims if there are clearly multiple INDEPENDENT and UNRELATED facts to check.
+    If the questions are related to the same subject (e.g., 'When was WW2 and who won?'), KEEP THEM TOGETHER as one claim.
+    ${mode === 'quick' ? 'Return at most 1 claim.' : 'Return at most 3 claims.'}
+    
+    User Input:
+    {input}
+    
+    {format_instructions}`,
     inputVariables: ["input"],
     partialVariables: { format_instructions: parser.getFormatInstructions() },
   });
@@ -50,7 +64,7 @@ export async function extractClaims(input: string, mode: 'quick' | 'deep' = 'dee
       const chain = prompt.pipe(model).pipe(parser);
       return chain.invoke({ input });
     });
-    const maxClaims = mode === 'quick' ? 1 : 3;
+    const maxClaims = isArticle ? 5 : 3; // URLs get up to 5 claims, short queries get up to 3
     const claims = (response as ExtractedClaim[]).slice(0, maxClaims);
     console.log(`[EXTRACTOR] ✓ Extracted ${claims.length} claim(s) via ${provider}:`);
     claims.forEach((c) => {

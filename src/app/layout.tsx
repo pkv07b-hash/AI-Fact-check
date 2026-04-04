@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 
 export const metadata: Metadata = {
-  title: "AXIOM.NULL | Intelligence for Truth Verification",
+  title: "AXIOM.AI | Intelligence for Truth Verification",
   description: "Neural-linked fact extraction. Cross-referencing 14.2B data points for sub-atomic truth detection.",
   icons: {
     icon: '/logo.png',

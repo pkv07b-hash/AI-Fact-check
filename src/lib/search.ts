@@ -195,7 +195,7 @@ function rankSearchResults(claim: string, results: SearchResult[]): SearchResult
   return [...results].sort((a, b) => scoreAgainstClaim(claim, b) - scoreAgainstClaim(claim, a));
 }
 
-async function wikiSearchOnce(query: string, timeoutMs: number = 6_000): Promise<SearchResult[]> {
+async function wikiSearchOnce(query: string, timeoutMs: number = 3_000): Promise<SearchResult[]> {
   // Use srlimit=4 (we usually only keep top 2-3 anyway) to reduce payload
   const url = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(query)}&utf8=&format=json&srlimit=4&origin=*`;
   // Dynamic timeout for Quick vs Deep
@@ -260,8 +260,7 @@ async function scrapeUrl(url: string): Promise<string> {
 export async function retrieveEvidence(claims: ExtractedClaim[], mode: 'quick' | 'deep' = 'deep'): Promise<ClaimEvidence[]> {
   const isQuick = mode === 'quick';
   const evidencePromises = claims.map(async (claim) => {
-    let queries = buildWikipediaSearchQueries(claim.claim);
-    if (isQuick) queries = queries.slice(0, 1); // Aggressive query culling for 20s target
+    let queries = buildWikipediaSearchQueries(claim.claim).slice(0, 3); // MAX 3 queries for speed
     const byKey = new Map<string, SearchResult>();
 
     console.log(`\n[SEARCH] Claim ID: ${claim.id}`);
@@ -270,7 +269,7 @@ export async function retrieveEvidence(claims: ExtractedClaim[], mode: 'quick' |
 
     // 🔥 SPEED OPTIMIZATION: Run all Wikipedia searches for this claim in PARALLEL
     const resultsBatches = await Promise.allSettled(
-      queries.map((q) => wikiSearchOnce(q, isQuick ? 2000 : 8000))
+      queries.map((q) => wikiSearchOnce(q, 2000))
     );
 
     for (const res of resultsBatches) {
@@ -313,114 +312,91 @@ export async function retrieveEvidence(claims: ExtractedClaim[], mode: 'quick' |
 
     // ── Wikipedia results (top 2 or top 1 if Quick) ─────────────────────────────
     const wikiResults = merged.slice(0, isQuick ? 1 : 2);
-    
-    // ── Deep Web Scraping (Enhance the top Wikipedia result or top link) ──
-    if (wikiResults.length > 0 && !isQuick) {
-      const primaryUrl = wikiResults[0].url;
-      const deepContent = await scrapeUrl(primaryUrl);
-      if (deepContent.length > 300) {
-        // Replace the tiny Wikipedia API snippet with the full scraped page content!
-        wikiResults[0].snippet = deepContent;
-      }
-    }
 
-    // ── News Site Search Links (reliable, no API key, no redirects) ────────────
-    // Generate direct search links on multiple authoritative news sites.
-    // These are always valid clickable URLs without any redirect issues.
     const newsQuery = tokens.slice(0, 6).join(" ") || claim.claim.slice(0, 80);
-    const NEWS_SOURCES = [
-      { name: "NDTV",      urlPattern: (q: string) => `https://www.ndtv.com/search?searchtext=${encodeURIComponent(q)}`,                   snippet: "Search NDTV — India's leading news network" },
-      { name: "BBC India", urlPattern: (q: string) => `https://www.bbc.com/search?q=${encodeURIComponent(q)}&d=INDIA_NEWS`,               snippet: "Search BBC News India for latest coverage" },
-      { name: "The Hindu", urlPattern: (q: string) => `https://www.thehindu.com/search/?q=${encodeURIComponent(q)}`,                      snippet: "Search The Hindu — India's national newspaper" },
-      { name: "ANI",       urlPattern: (q: string) => `https://aninews.in/?s=${encodeURIComponent(q)}`,                                   snippet: "Search ANI — Asian News International" },
-      { name: "Reuters",   urlPattern: (q: string) => `https://www.reuters.com/site-search/?query=${encodeURIComponent(q)}`,              snippet: "Search Reuters — global news agency" },
-      { name: "News18",    urlPattern: (q: string) => `https://www.news18.com/commonfeeds/index.html#gsc.q=${encodeURIComponent(q)}`,     snippet: "Search News18 — CNN-News18" },
-      { name: "The Wire",  urlPattern: (q: string) => `https://thewire.in/?s=${encodeURIComponent(q)}`,                                   snippet: "Search The Wire — independent Indian journalism" },
-      { name: "Times of India", urlPattern: (q: string) => `https://timesofindia.indiatimes.com/topic/${encodeURIComponent(q)}`,          snippet: "Search Times of India — largest English newspaper" },
-    ];
 
-    // Pick 3 sources deterministically based on claim content (so results are stable)
-    const claimHash = claim.claim.split("").reduce((a, c) => a + c.charCodeAt(0), 0);
-    const picked = [
-      NEWS_SOURCES[claimHash % NEWS_SOURCES.length],
-      NEWS_SOURCES[(claimHash + 2) % NEWS_SOURCES.length],
-      NEWS_SOURCES[(claimHash + 5) % NEWS_SOURCES.length],
-    ];
+    // ── REAL WEB SEARCH: Tavily (primary) + DuckDuckGo (fallback) ─────────────
+    let webResults: SearchResult[] = [];
 
-    const newsResults: SearchResult[] = picked.map((src) => ({
-      url: src.urlPattern(newsQuery),
-      title: `${src.name} — Search: "${newsQuery.slice(0, 40)}"`,
-      snippet: src.snippet,
-    }));
-
-    console.log(`[SEARCH] News sources added: ${picked.map(s => s.name).join(", ")}`);
-
-    // ── Tavily AI Search (real article content, optional) ─────────────────────
-    let tavilyResults: SearchResult[] = [];
+    // Try Tavily first (real search engine with actual article content)
     const tavilyKey = process.env.TAVILY_API_KEY?.trim();
-    if (tavilyKey && !isQuick) {
+    if (tavilyKey) {
       try {
-        console.log(`[SEARCH] Running Tavily search for: "${newsQuery}"`);
-        const { tavily } = await import("@tavily/core");
-        const tvly = tavily({ apiKey: tavilyKey });
-        
-        const tvlyRes = await tvly.search(newsQuery, {
-          searchDepth: "basic",
-          includeImages: false,
-          includeAnswer: false,
-          maxResults: 3,
+        console.log(`[SEARCH] Tavily web search: "${newsQuery}"`);
+        const tvlyRes = await fetch("https://api.tavily.com/search", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            api_key: tavilyKey,
+            query: newsQuery,
+            search_depth: "basic",
+            include_images: false,
+            include_answer: false,
+            max_results: 4,
+          }),
+          signal: AbortSignal.timeout(4000),
         });
-        
-        const seenUrls = new Set([...wikiResults, ...newsResults].map(r => r.url));
-        for (const res of tvlyRes.results) {
-          if (!res.url || !res.title || seenUrls.has(res.url)) continue;
-          seenUrls.add(res.url);
-          tavilyResults.push({
-            url: res.url,
-            title: res.title,
-            snippet: (res.content || "").slice(0, 400).trim(),
-          });
+        if (tvlyRes.ok) {
+          const tvlyData = await tvlyRes.json();
+          const seenUrls = new Set(wikiResults.map(r => r.url));
+          for (const res of tvlyData.results || []) {
+            if (!res.url || !res.title || seenUrls.has(res.url)) continue;
+            seenUrls.add(res.url);
+            webResults.push({
+              url: res.url,
+              title: res.title,
+              snippet: (res.content || "").slice(0, 400).trim(),
+            });
+          }
+          console.log(`[SEARCH] Tavily returned ${webResults.length} real result(s)`);
         }
-        console.log(`[SEARCH] Tavily returned ${tavilyResults.length} result(s)`);
       } catch (err) {
-        console.warn(`[SEARCH] Tavily search failed:`, err instanceof Error ? err.message : err);
+        console.warn(`[SEARCH] Tavily failed:`, err instanceof Error ? err.message : err);
       }
     }
 
-    // ── X (Twitter) & YouTube Search Links ────────────────────────────────────
-    const xResult: SearchResult = {
-      url: `https://twitter.com/search?q=${encodeURIComponent(newsQuery)}`,
-      title: `X (Twitter) — Search: "${newsQuery.slice(0, 40)}"`,
-      snippet: "Search X for real-time posts and verified accounts."
-    };
+    // Fallback: DuckDuckGo Instant Answer API (free, no API key)
+    if (webResults.length === 0) {
+      try {
+        console.log(`[SEARCH] DuckDuckGo search: "${newsQuery}"`);
+        const ddgRes = await fetch(
+          `https://api.duckduckgo.com/?q=${encodeURIComponent(newsQuery)}&format=json&no_html=1&skip_disambig=1`,
+          { signal: AbortSignal.timeout(3000) }
+        );
+        if (ddgRes.ok) {
+          const ddg = await ddgRes.json();
+          const topics = [...(ddg.RelatedTopics || []), ...(ddg.Results || [])];
+          for (const t of topics.slice(0, 4)) {
+            if (t.FirstURL && t.Text) {
+              webResults.push({
+                url: t.FirstURL,
+                title: t.Text.slice(0, 80),
+                snippet: t.Text.slice(0, 300),
+              });
+            }
+          }
+          // Also use Abstract if available
+          if (ddg.AbstractURL && ddg.AbstractText) {
+            webResults.unshift({
+              url: ddg.AbstractURL,
+              title: ddg.AbstractSource || "Reference",
+              snippet: ddg.AbstractText.slice(0, 400),
+            });
+          }
+          console.log(`[SEARCH] DuckDuckGo returned ${webResults.length} result(s)`);
+        }
+      } catch (err) {
+        console.warn(`[SEARCH] DuckDuckGo failed:`, err instanceof Error ? err.message : err);
+      }
+    }
 
-    const ytResult: SearchResult = {
-      url: `https://www.youtube.com/results?search_query=${encodeURIComponent(newsQuery)}`,
-      title: `YouTube — Search: "${newsQuery.slice(0, 40)}"`,
-      snippet: "Search YouTube for video evidence and news coverage."
-    };
+    console.log(`[SEARCH] Web search results: ${webResults.length}`);
 
-    // ── Structural Merge: Wiki -> News -> Web/X -> YouTube ────────────────────
+    // ── Only genuine evidence — no filler links ─────────────────────────────────
     const finalResults: SearchResult[] = [];
     
-    // Slot 1: Wikipedia (Must be first)
-    if (wikiResults.length > 0) finalResults.push(wikiResults[0]);
-    
-    // Slot 2: News Source (Must be in middle)
-    if (newsResults.length > 0) finalResults.push(newsResults[0]);
-    
-    // Slot 3: Web Page / Tavily (Middle)
-    if (tavilyResults.length > 0) {
-      finalResults.push(tavilyResults[0]);
-    } else if (newsResults.length > 1) {
-      finalResults.push(newsResults[1]);
-    }
-
-    // Slot 4: X / Twitter (Optional/Middle)
-    finalResults.push(xResult);
-    
-    // Slot 5: YouTube Video (Must be last)
-    finalResults.push(ytResult);
+    // Only real web search results (Tavily or DuckDuckGo)
+    for (const w of webResults.slice(0, 5)) finalResults.push(w);
 
     const primaryQuery = queries[0] ?? claim.claim;
 

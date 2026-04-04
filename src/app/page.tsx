@@ -21,6 +21,10 @@ interface MediaAnalysis {
   hasManipulationSignals: boolean;
   manipulationDetails?: string;
   detections?: Detection[];
+  isAiGenerated: boolean;
+  aiGeneratedConfidence: number;
+  aiGeneratedAnalysis?: string;
+  syntheticType?: 'deepfake' | 'ai_generated_image' | 'ai_generated_audio' | 'photoshopped' | 'none';
 }
 
 interface HistoryItem {
@@ -64,6 +68,7 @@ export default function Home() {
   const [input, setInput] = useState("");
   const [step, setStep] = useState<PipelineStep>("idle");
   const [reportData, setReportData] = useState<AccuracyReport | null>(null);
+  const [imageAiDetections, setImageAiDetections] = useState<any[]>([]);
   const [mediaAnalysis, setMediaAnalysis] = useState<MediaAnalysis | null>(null);
   const [errorMsg, setErrorMsg] = useState("");
   const [successMsg, setSuccessMsg] = useState("");
@@ -76,6 +81,7 @@ export default function Home() {
   const [seed, setSeed] = useState<number>(0);
   const [pipelineProgress, setPipelineProgress] = useState(0);
   const [cachedReports, setCachedReports] = useState<{query: string, report: AccuracyReport}[]>([]);
+  const [historySearch, setHistorySearch] = useState("");
   const [isListening, setIsListening] = useState(false);
   const [isLoggedIn, setIsLoggedIn] = useState(true);
   const [userReports, setUserReports] = useState<{topic?: string, timestamp: string, text: string}[]>([]);
@@ -101,24 +107,48 @@ export default function Home() {
     if (step === 'complete' && reportData) {
       setPipelineProgress(reportData.overallTrustScore);
     } else if (isProcessing) {
-      if (pipelineProgress === 0) setPipelineProgress(5);
+      // Sync progress % to actual pipeline step
+      const stepRanges: Record<string, [number, number]> = {
+        scanning: [2, 15],
+        extracting: [5, 30],
+        searching: [31, 65],
+        verifying: [66, 95],
+      };
+      const [min, max] = stepRanges[step] || [5, 95];
+      // Jump to the step's minimum if we're below it
+      setPipelineProgress(prev => prev < min ? min : prev);
       interval = setInterval(() => {
         setPipelineProgress(prev => {
-          if (prev >= 98) return 98;
-          // Frequent small jumps for smoothness
-          const next = prev + (Math.random() * 2 + 0.5);
-          return next > 98 ? 98 : next;
+          if (prev >= max) return max; // Cap at step's max
+          const jump = Math.random() * 1.5 + 0.3;
+          return Math.min(prev + jump, max);
         });
-      }, 400); // More frequent updates
+      }, 300);
     } else if (step === 'idle' || step === 'error') {
       setPipelineProgress(0);
     }
     return () => clearInterval(interval);
-  }, [isProcessing, step === 'complete', reportData]);
+  }, [isProcessing, step, reportData]);
   
   useEffect(() => {
-    setSeed(Math.floor(Math.random() * 2));
+    setSeed(Date.now());
   }, []);
+
+  useEffect(() => {
+    if (currentView === 'terminal') {
+      setSeed(Date.now());
+    }
+  }, [currentView]);
+
+  const deleteHistoryItem = (query: string) => {
+    const updatedHistory = history.filter(item => item.claim !== query);
+    const updatedCached = cachedReports.filter(item => item.query !== query);
+    setHistory(updatedHistory);
+    setCachedReports(updatedCached);
+    
+    localStorage.setItem(isLoggedIn ? 'factcheck_history' : 'factcheck_history_guest', JSON.stringify(updatedHistory));
+    // cache is usually fetched from server, but we can update local state for immediate feedback
+  };
 
   const fetchCache = async () => {
     try {
@@ -139,16 +169,27 @@ export default function Home() {
   }, [currentView]);
 
   const currentPills = React.useMemo(() => {
-    const idx = inputMode === 'text' ? seed : (seed + 1) % 2;
-    const all = [
-      SUGGESTIONS.iran[idx],
-      SUGGESTIONS.india[idx],
-      SUGGESTIONS.global[idx],
-      SUGGESTIONS.it[idx],
-      SUGGESTIONS.digital[idx],
-      SUGGESTIONS.ipl[idx],
+    const dummy = seed; // trigger recalculation on seed change
+    const allOptions = [
+      ...SUGGESTIONS.iran,
+      ...SUGGESTIONS.india,
+      ...SUGGESTIONS.global,
+      ...SUGGESTIONS.it,
+      ...SUGGESTIONS.digital,
+      ...SUGGESTIONS.ipl,
     ];
-    return inputMode === 'text' ? all.slice(0, 5) : all;
+    
+    // Prevent random shuffle on the server side to fix hydration mismatch
+    if (seed === 0) {
+      return inputMode === 'text' ? allOptions.slice(0, 5) : allOptions.slice(0, 6);
+    }
+    
+    // Shuffle array
+    for (let i = allOptions.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [allOptions[i], allOptions[j]] = [allOptions[j], allOptions[i]];
+    }
+    return inputMode === 'text' ? allOptions.slice(0, 5) : allOptions.slice(0, 6);
   }, [inputMode, seed]);
   
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -193,9 +234,11 @@ export default function Home() {
     const file = e.target.files?.[0] ?? null;
     setSelectedFile(file);
     if (!file) { setFilePreview(null); return; }
-    // Create object URL for image preview
+    // Create object URL for image preview, set to 'pdf' for PDF
     if (file.type.startsWith('image/')) {
       setFilePreview(URL.createObjectURL(file));
+    } else if (file.type === 'application/pdf') {
+      setFilePreview('pdf');
     } else {
       setFilePreview(null); // videos don't get a preview thumbnail
     }
@@ -334,7 +377,106 @@ export default function Home() {
     }
   };
 
-  const handleAnalyze = async (e?: React.FormEvent, overrideInput?: string, mode: 'quick' | 'deep' = 'deep') => {
+  const handleDownloadReport = () => {
+    if (!reportData) return;
+    
+    let html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Axiom Verification Report</title>
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; line-height: 1.6; max-width: 800px; margin: 0 auto; padding: 2rem; color: #1a1a1a; background: #fff; }
+    h1 { color: #111; border-bottom: 2px solid #eee; padding-bottom: 0.5rem; }
+    .score-banner { background: #f8f9fa; padding: 1.5rem; border-radius: 8px; margin: 2rem 0; border-left: 4px solid #4ade80; }
+    .claim-card { border: 1px solid #e5e7eb; border-radius: 8px; padding: 1.5rem; margin-bottom: 1.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
+    .status { display: inline-block; padding: 0.25rem 0.75rem; border-radius: 999px; font-size: 0.875rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; }
+    .status-VERIFIED { background: #dcfce7; color: #166534; }
+    .status-DEBUNKED { background: #fee2e2; color: #991b1b; }
+    .status-MISLEADING { background: #fef3c7; color: #92400e; }
+    .status-INCONCLUSIVE { background: #f3f4f6; color: #374151; }
+    .source-list { list-style-type: none; padding-left: 0; }
+    .source-list li { margin-bottom: 0.5rem; font-size: 0.9rem; }
+    .source-link { color: #2563eb; text-decoration: none; word-break: break-all; }
+    .source-link:hover { text-decoration: underline; }
+    .label { font-weight: bold; color: #4b5563; text-transform: uppercase; font-size: 0.75rem; letter-spacing: 0.05em; margin-bottom: 0.25rem; display: block; }
+  </style>
+</head>
+<body>
+  <h1>Axiom Verification Report</h1>
+  <p><strong>Query / Source:</strong> ${input || reportData.globalConclusion?.split(" ")[0] || "Fact Check"}</p>
+  
+  <div class="score-banner">
+    <h2 style="margin-top:0">Trust Score: ${Math.round(reportData.overallTrustScore)}%</h2>
+    <p>${reportData.globalConclusion?.replace(/\n/g, "<br>") || "No conclusion provided."}</p>
+  </div>
+
+  <h2>Verified Claims (${reportData.totalClaims})</h2>
+`;
+
+    if (reportData.verifiedClaims) {
+      reportData.verifiedClaims.forEach(claim => {
+        const displayStatus = 
+          claim.status === "VERIFIED" ? "True" : 
+          claim.status === "DEBUNKED" ? "False" : 
+          claim.status === "MISLEADING" ? "Misleading" : "Unverifiable";
+
+        html += `
+  <div class="claim-card">
+    <div style="margin-bottom: 1.5rem;">
+      <span class="label">Claim</span>
+      <h3 style="margin-top: 0; font-size: 1.25rem;">${claim.claim}</h3>
+    </div>
+
+    <div style="margin-bottom: 1rem; display: flex; align-items: center; gap: 1rem;">
+      <div>
+        <span class="label">Verdict</span>
+        <span class="status status-${claim.status}">${displayStatus}</span>
+      </div>
+      <div>
+        <span class="label">Confidence</span>
+        <span style="font-size: 0.875rem; font-weight: 600; color: #111;">${claim.confidenceScore}%</span>
+      </div>
+    </div>
+
+    <div style="margin-bottom: 1rem;">
+      <span class="label">Reasoning</span>
+      <p style="margin: 0;">${claim.reasoning}</p>
+    </div>
+`;
+        
+        if (!mediaAnalysis && claim.evidence && claim.evidence.results && claim.evidence.results.length > 0) {
+          html += `
+    <div>
+      <span class="label">Sources</span>
+      <ul class="source-list">`;
+          claim.evidence.results.forEach((res: any) => {
+            html += `<li>• <a href="${res.url}" target="_blank" class="source-link">${res.title || res.url}</a></li>`;
+          });
+          html += `</ul>
+    </div>`;
+        }
+        
+        html += `</div>`;
+      });
+    }
+
+    html += `
+</body>
+</html>`;
+
+    const blob = new Blob([html], { type: 'text/html' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `axiom-report-${Date.now()}.html`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleAnalyze = async (e?: React.FormEvent, overrideInput?: string, mode: 'quick' | 'deep' = 'quick') => {
     if (e) e.preventDefault();
     const targetInput = overrideInput || input;
     if (!targetInput.trim()) return;
@@ -350,14 +492,19 @@ export default function Home() {
       const apiCall = fetch("/api/factcheck", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ input: targetInput, mode })
+        body: JSON.stringify({ input: targetInput, mode, skipCache: true })
       });
 
+      // Start step simulation — these will be overridden once the API responds
       const isQuick = mode === 'quick';
-      setTimeout(() => setStep(prev => prev === 'extracting' ? 'searching' : prev), isQuick ? 800 : 2500);
-      setTimeout(() => setStep(prev => prev === 'searching' ? 'verifying' : prev), isQuick ? 1800 : 5500);
+      const t1 = setTimeout(() => setStep(prev => prev === 'extracting' ? 'searching' : prev), isQuick ? 800 : 2500);
+      const t2 = setTimeout(() => setStep(prev => prev === 'searching' ? 'verifying' : prev), isQuick ? 1800 : 5500);
 
       const res = await apiCall;
+      // Clear any pending step timers — real response is here
+      clearTimeout(t1);
+      clearTimeout(t2);
+
       if (!res.ok) {
         let errMsg = "Failed to process request.";
         try {
@@ -366,20 +513,13 @@ export default function Home() {
         } catch (_) { /* ignore */ }
         throw new Error(errMsg);
       }
-      const data: AccuracyReport = await res.json();
-      setReportData(data);
+      const data = await res.json();
+      setReportData(data as AccuracyReport);
+      setImageAiDetections(data.imageAiDetections || []);
       
-      if (data.cached) {
-        // INSTANT HIT: Skip all simulated delays
-        setStep("complete");
-        setCurrentView('nodes');
-      } else {
-        // NORMAL PATH: Wait for the simulated pipeline to reach the natural finish
-        setTimeout(() => {
-          setStep("complete");
-          setCurrentView('nodes');
-        }, isQuick ? 2500 : 7000);
-      }
+      // Immediately transition to complete — no fake delay
+      setStep("complete");
+      setCurrentView('nodes');
 
       const outcome = data.overallTrustScore > 75 ? 'Verified' : data.overallTrustScore > 40 ? 'Substantiated' : 'Flagged';
       saveToHistory(targetInput, data.overallTrustScore, outcome);
@@ -401,7 +541,7 @@ export default function Home() {
               className="w-5 h-5 md:w-7 md:h-7 object-contain mix-blend-screen" 
             />
           </div>
-          <h1 className="font-['Manrope'] tracking-tighter uppercase font-black text-xl md:text-2xl text-primary italic -skew-x-12">AXIOM.NULL</h1>
+          <h1 className="font-['Manrope'] tracking-tighter uppercase font-black text-xl md:text-2xl text-primary drop-shadow-[0_0_12px_rgba(183,196,255,0.4)]">AXIOM.AI</h1>
         </div>
         <nav className="hidden md:flex gap-8 items-center">
           {navItems.map(item => (
@@ -468,7 +608,7 @@ export default function Home() {
                 <div className="md:w-3/5 space-y-4 md:space-y-6 mt-4 md:mt-0">
                   <h2 className="font-headline text-4xl md:text-7xl font-black tracking-tighter leading-[0.9] text-on-surface">
                     Intelligence for <br/>
-                    <div className="ml-16 md:ml-48">
+                    <div className="ml-4 md:ml-12">
                       <span className="text-primary inline-block">Truth&nbsp;&nbsp;Verification</span>
                     </div>
                   </h2>
@@ -549,7 +689,7 @@ export default function Home() {
 
                           <button 
                             type="button" 
-                            onClick={(e) => handleAnalyze(undefined, undefined, 'deep')}
+                            onClick={(e) => handleAnalyze(undefined, undefined, 'quick')}
                             disabled={!input.trim() || isProcessing}
                             className="flex-1 w-full bg-[linear-gradient(110deg,#0a0a0c,#1f2a3f,#2a3b5c,#1f2a3f,#0a0a0c)] text-white font-headline font-black tracking-widest py-4 text-xl md:text-2xl hover:brightness-125 active:scale-95 transition-all shadow-[0_4px_20px_rgba(0,0,0,0.5)] border border-outline-variant/30 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-3 rounded-xl animate-water-sweep h-[60px]"
                           >
@@ -567,7 +707,9 @@ export default function Home() {
                           onClick={() => fileInputRef.current?.click()}
                           className="border-2 border-dashed border-outline-variant/40 hover:border-primary/60 transition-colors cursor-pointer flex flex-col items-center justify-center py-10 gap-3 bg-surface-container/20 hover:bg-surface-container/40 rounded-2xl"
                         >
-                          {filePreview ? (
+                          {filePreview === 'pdf' ? (
+                            <span className="material-symbols-outlined text-primary text-6xl">picture_as_pdf</span>
+                          ) : filePreview ? (
                             // eslint-disable-next-line @next/next/no-img-element
                             <img src={filePreview} alt="Preview" className="max-h-28 object-contain rounded" />
                           ) : (
@@ -583,7 +725,7 @@ export default function Home() {
                           ) : (
                             <>
                               <span className="text-on-surface-variant text-xs">Click to select file</span>
-                              <span className="text-outline text-[10px] uppercase tracking-wider">JPEG · PNG · MP4 · WebM</span>
+                              <span className="text-outline text-[10px] uppercase tracking-wider">IMAGES · VIDEOS · PDF DOCUMENTS</span>
                             </>
                           )}
                         </div>
@@ -591,7 +733,7 @@ export default function Home() {
                         <input
                           ref={fileInputRef}
                           type="file"
-                          accept="image/jpeg,image/png,image/webp,image/gif,image/heic,image/heif,video/mp4,video/webm,video/ogg,video/quicktime,video/mpeg"
+                          accept="image/jpeg,image/png,image/webp,image/gif,image/heic,image/heif,video/mp4,video/webm,video/ogg,video/quicktime,video/mpeg,application/pdf"
                           className="hidden"
                           onChange={handleFileSelect}
                           disabled={isProcessing}
@@ -648,6 +790,74 @@ export default function Home() {
                     }`}
                     style={{ width: step === 'complete' && reportData ? `${reportData.overallTrustScore}%` : isProcessing ? `${pipelineProgress}%` : '0%' }}></div>
                   </div>
+
+                  {/* ── Agentic Multi-Step Progress Indicator ── */}
+                  {(isProcessing || step === 'complete') && (
+                    <div className="mt-6 pt-4 border-t border-outline-variant/10">
+                      <span className="font-label text-[9px] uppercase tracking-[0.15em] text-outline block mb-4">Agentic Pipeline Stages</span>
+                      <div className="flex items-center justify-between gap-0">
+                        {([
+                          { key: 'extracting', icon: 'document_scanner', label: 'Extracting', sub: 'Claim parsing' },
+                          { key: 'searching',  icon: 'travel_explore',   label: 'Searching',  sub: 'Evidence fetch' },
+                          { key: 'verifying',  icon: 'psychology',       label: 'Verifying',  sub: 'AI reasoning' },
+                          { key: 'complete',   icon: 'verified',         label: 'Complete',   sub: 'Report ready' },
+                        ] as const).map((s, i, arr) => {
+                          const stepsOrder = ['extracting', 'searching', 'verifying', 'complete'];
+                          const currentIdx = stepsOrder.indexOf(step);
+                          const thisIdx = stepsOrder.indexOf(s.key);
+                          const isDone = thisIdx < currentIdx;
+                          const isActive = thisIdx === currentIdx;
+                          const isPending = thisIdx > currentIdx;
+
+                          return (
+                            <div key={s.key} className="flex items-center flex-1 last:flex-none">
+                              {/* Step Node */}
+                              <div className="flex flex-col items-center gap-1.5 min-w-[56px]">
+                                <div className={`w-10 h-10 rounded-full flex items-center justify-center transition-all duration-500 ${
+                                  isDone   ? 'bg-[#00ff88]/20 border-2 border-[#00ff88] shadow-[0_0_12px_rgba(0,255,136,0.3)]' :
+                                  isActive ? 'bg-primary/20 border-2 border-primary shadow-[0_0_15px_rgba(59,130,246,0.4)] animate-pulse' :
+                                             'bg-surface-container-highest/30 border border-outline-variant/30'
+                                }`}>
+                                  <span className={`material-symbols-outlined text-base transition-all duration-500 ${
+                                    isDone   ? 'text-[#00ff88]' :
+                                    isActive ? 'text-primary' :
+                                               'text-outline/40'
+                                  }`}>
+                                    {isDone ? 'check_circle' : s.icon}
+                                  </span>
+                                </div>
+                                <span className={`text-[8px] font-label uppercase tracking-wider text-center leading-tight transition-colors duration-500 ${
+                                  isDone   ? 'text-[#00ff88]' :
+                                  isActive ? 'text-primary font-bold' :
+                                             'text-outline/40'
+                                }`}>
+                                  {s.label}
+                                </span>
+                                <span className={`text-[7px] font-label tracking-wider text-center transition-colors duration-500 ${
+                                  isActive ? 'text-primary/60' : 'text-outline/20'
+                                }`}>
+                                  {s.sub}
+                                </span>
+                              </div>
+
+                              {/* Connecting Line (not after last) */}
+                              {i < arr.length - 1 && (
+                                <div className="flex-1 h-[2px] mx-1 relative overflow-hidden rounded-full">
+                                  <div className="absolute inset-0 bg-outline-variant/15"></div>
+                                  <div className={`absolute top-0 left-0 h-full transition-all duration-700 ease-out rounded-full ${
+                                    isDone ? 'w-full bg-[#00ff88]/60' :
+                                    isActive ? 'w-1/2 bg-primary/50 animate-pulse' :
+                                               'w-0 bg-outline-variant/10'
+                                  }`}></div>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
                   {step === 'complete' && reportData && (
                     <div className="flex gap-4 mt-4">
                       <button onClick={() => setCurrentView('nodes')}
@@ -770,6 +980,14 @@ export default function Home() {
               </div>
               <div className="flex items-center gap-3">
                 <button 
+                  onClick={handleDownloadReport}
+                  disabled={!reportData}
+                  title="Download HTML Report"
+                  className="w-10 h-10 rounded-full border border-primary/30 bg-primary/5 text-primary hover:border-primary hover:bg-primary/10 hover:shadow-[0_0_15px_rgba(183,196,255,0.3)] transition-all flex items-center justify-center disabled:opacity-30 disabled:cursor-not-allowed group"
+                >
+                  <span className="material-symbols-outlined text-sm group-hover:scale-110 transition-transform">download</span>
+                </button>
+                <button 
                   onClick={handleShare}
                   disabled={!reportData}
                   title="Share Analysis"
@@ -779,9 +997,9 @@ export default function Home() {
                 </button>
                 <button 
                   onClick={() => { setReportData(null); setMediaAnalysis(null); setInput(""); setStep("idle"); setCurrentView("terminal"); }}
-                  className="border border-outline-variant text-outline hover:text-on-surface hover:border-primary font-label text-[10px] uppercase tracking-widest px-4 py-2 transition-all flex items-center gap-2"
+                  className="rounded-full border border-outline-variant text-outline hover:text-on-surface hover:border-primary font-label text-[10px] uppercase tracking-widest px-6 py-2 transition-all flex items-center gap-2 hover:bg-primary/5 active:scale-95"
                 >
-                  <span className="material-symbols-outlined text-sm">restart_alt</span> New Stream
+                  <span className="material-symbols-outlined text-sm">chat_bubble</span> New Chat
                 </button>
               </div>
             </div>
@@ -791,7 +1009,7 @@ export default function Home() {
                 <span className="material-symbols-outlined text-outline text-6xl block">insert_chart</span>
                 <p className="font-headline font-bold uppercase tracking-widest text-on-surface-variant">No Active Node Data</p>
                 <p className="text-outline text-sm">Run an analysis stream from the Terminal to populate this view.</p>
-                <button onClick={() => setCurrentView('terminal')} className="border border-primary text-primary font-label text-[10px] uppercase tracking-widest px-6 py-3 hover:bg-primary hover:text-on-primary transition-all">→ Open Terminal</button>
+                <button onClick={() => setCurrentView('terminal')} className="rounded-full border border-primary text-primary font-label text-[10px] uppercase tracking-widest px-8 py-3 hover:bg-primary hover:text-on-primary transition-all active:scale-95">→ Open Terminal</button>
               </div>
             ) : (
               <>
@@ -800,7 +1018,7 @@ export default function Home() {
                   <div className="space-y-4">
                     {/* Manipulation warning — shown prominently if detected */}
                     {mediaAnalysis.hasManipulationSignals && (
-                      <div className="border border-error bg-error/5 p-5 flex items-start gap-4">
+                      <div className="border border-error bg-error/5 p-5 flex items-start gap-4 rounded-xl">
                         <span className="material-symbols-outlined text-error text-3xl shrink-0">gpp_bad</span>
                         <div>
                           <p className="font-headline font-bold text-error uppercase text-xs tracking-widest mb-1">⚠ Manipulation Signals Detected</p>
@@ -808,6 +1026,79 @@ export default function Home() {
                         </div>
                       </div>
                     )}
+
+                    {/* ── AI-Generated / Deepfake Detection Panel ── */}
+                    <div className={`p-6 flex flex-col gap-4 rounded-2xl border ${
+                      mediaAnalysis.isAiGenerated 
+                        ? 'border-[#fbbf24]/40 bg-[#fbbf24]/5' 
+                        : 'border-[#00ff88]/30 bg-[#00ff88]/5'
+                    }`}>
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-3">
+                          <div className={`w-10 h-10 rounded-full flex items-center justify-center border-2 ${
+                            mediaAnalysis.isAiGenerated 
+                              ? 'border-[#fbbf24] bg-[#fbbf24]/20 shadow-[0_0_12px_rgba(251,191,36,0.3)]' 
+                              : 'border-[#00ff88] bg-[#00ff88]/20 shadow-[0_0_12px_rgba(0,255,136,0.3)]'
+                          }`}>
+                            <span className={`material-symbols-outlined text-lg ${
+                              mediaAnalysis.isAiGenerated ? 'text-[#fbbf24]' : 'text-[#00ff88]'
+                            }`}>
+                              {mediaAnalysis.isAiGenerated ? 'auto_fix_high' : 'verified_user'}
+                            </span>
+                          </div>
+                          <div>
+                            <h3 className="font-headline font-bold uppercase tracking-widest text-xs text-on-surface">AI-Generated Media Detection</h3>
+                            <p className="text-outline text-[9px] uppercase tracking-wider">Deepfake & Synthetic Content Analysis</p>
+                          </div>
+                        </div>
+                        <span className={`text-[9px] font-black uppercase tracking-widest px-3 py-1 border rounded-full ${
+                          mediaAnalysis.isAiGenerated
+                            ? 'text-[#fbbf24] border-[#fbbf24] bg-[#fbbf24]/10'
+                            : 'text-[#00ff88] border-[#00ff88] bg-[#00ff88]/10'
+                        }`}>
+                          {mediaAnalysis.isAiGenerated ? '⚠ AI-GENERATED' : '✓ AUTHENTIC'}
+                        </span>
+                      </div>
+
+                      {/* Confidence Gauge */}
+                      <div className="flex items-center gap-4">
+                        <div className="flex-1">
+                          <div className="flex justify-between text-[9px] font-label uppercase text-outline mb-1">
+                            <span>AI-Generation Confidence</span>
+                            <span className={mediaAnalysis.isAiGenerated ? 'text-[#fbbf24]' : 'text-[#00ff88]'}>
+                              {mediaAnalysis.aiGeneratedConfidence ?? 0}%
+                            </span>
+                          </div>
+                          <div className="w-full h-2 bg-surface-container-highest/50 rounded-full overflow-hidden">
+                            <div 
+                              className={`h-full rounded-full transition-all duration-1000 ${
+                                (mediaAnalysis.aiGeneratedConfidence ?? 0) > 60 
+                                  ? 'bg-[#fbbf24]' 
+                                  : (mediaAnalysis.aiGeneratedConfidence ?? 0) > 30 
+                                    ? 'bg-primary' 
+                                    : 'bg-[#00ff88]'
+                              }`}
+                              style={{ width: `${mediaAnalysis.aiGeneratedConfidence ?? 0}%` }}
+                            ></div>
+                          </div>
+                        </div>
+                        {mediaAnalysis.syntheticType && mediaAnalysis.syntheticType !== 'none' && (
+                          <span className="text-[8px] font-black uppercase tracking-widest px-2 py-1 border border-[#fbbf24]/30 text-[#fbbf24] rounded-full whitespace-nowrap">
+                            {mediaAnalysis.syntheticType.replace(/_/g, ' ')}
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Forensic Analysis */}
+                      {mediaAnalysis.aiGeneratedAnalysis && (
+                        <div className="border-t border-outline-variant/10 pt-3">
+                          <span className="font-label text-[9px] uppercase tracking-widest text-outline block mb-2">Forensic Breakdown</span>
+                          <p className="text-on-surface-variant text-xs leading-relaxed border-l-2 border-primary/30 pl-3">
+                            {mediaAnalysis.aiGeneratedAnalysis}
+                          </p>
+                        </div>
+                      )}
+                    </div>
                     {/* Media metadata + extracted content */}
                     <div className="bg-surface-container-low border border-outline-variant/20 p-6 grid grid-cols-1 md:grid-cols-2 gap-6 rounded-2xl">
                       <div className="space-y-3">
@@ -859,6 +1150,8 @@ export default function Home() {
                   </div>
                 )}
 
+
+
                 {/* Score Ring + Summary */}
                 <div className="grid grid-cols-1 md:grid-cols-12 gap-4">
                   {/* Circular Score */}
@@ -895,23 +1188,40 @@ export default function Home() {
                     </div>
                   </div>
 
-                  {/* Claim Cards */}
                   <div className="md:col-span-8 space-y-4">
                     {reportData.verifiedClaims.map((claim, idx) => {
-                      const isTrue = claim.status === 'True';
-                      const isFalse = claim.status === 'False';
+                      const isVerified = claim.status === 'VERIFIED';
+                      const isMisleading = claim.status === 'MISLEADING';
+                      const isDebunked = claim.status === 'DEBUNKED';
+                      
+                      let badgeTextClasses = 'text-[#94a3b8] border-[#94a3b8]';
+                      let badgeIcon = 'help';
+                      let borderClasses = 'border-l-[#94a3b8] border-[#94a3b8]/30 hover:shadow-[0_4px_20px_rgba(148,163,184,0.15)]';
+                      
+                      if (isVerified) {
+                        badgeTextClasses = 'text-[#00ff88] border-[#00ff88]';
+                        badgeIcon = 'check_circle';
+                        borderClasses = 'border-l-[#00ff88] border-[#00ff88]/30 hover:shadow-[0_4px_20px_rgba(0,255,136,0.15)]';
+                      } else if (isMisleading) {
+                        badgeTextClasses = 'text-[#fbbf24] border-[#fbbf24]';
+                        badgeIcon = 'priority_high';
+                        borderClasses = 'border-l-[#fbbf24] border-[#fbbf24]/40 hover:shadow-[0_4px_20px_rgba(251,191,36,0.15)]';
+                      } else if (isDebunked) {
+                        badgeTextClasses = 'text-[#ef4444] border-[#ef4444]';
+                        badgeIcon = 'cancel';
+                        borderClasses = 'border-l-[#ef4444] border-[#ef4444]/40 hover:shadow-[0_4px_20px_rgba(239,68,68,0.15)]';
+                      }
+
                       return (
-                        <div key={idx} className={`p-6 border bg-surface-container-lowest rounded-2xl border-l-4 shadow-[inset_6px_0_15px_-6px_rgba(183,196,255,0.3)] hover:-translate-y-1 transition-all duration-300 ${
-                          isFalse ? 'border-l-error border-error/40 hover:shadow-[0_4px_20px_rgba(239,68,68,0.15)]' : isTrue ? 'border-l-primary border-primary/30 hover:shadow-[0_4px_20px_rgba(59,130,246,0.15)]' : 'border-l-outline-variant border-outline-variant/20 hover:shadow-[0_4px_20px_rgba(255,255,255,0.05)]'
-                        }`}>
+                        <div key={idx} className={`p-6 border bg-surface-container-lowest rounded-2xl border-l-4 shadow-[inset_6px_0_15px_-6px_rgba(183,196,255,0.1)] hover:-translate-y-1 transition-all duration-300 ${borderClasses}`}>
                           <div className="flex items-start justify-between gap-4 mb-4">
-                            <div className="space-y-1">
-                              <span className="font-label text-[9px] text-outline uppercase tracking-widest">CLAIM_ID :: {claim.id.toUpperCase()}</span>
-                              <p className="font-headline font-bold text-base text-on-surface leading-tight">"{claim.claim}"</p>
+                            <div className="flex-1 min-w-0">
+                              <span className="font-label text-[9px] uppercase tracking-[0.2em] text-outline block mb-1">Claim [0${idx + 1}]</span>
+                              <h4 className="text-on-surface font-headline font-bold text-sm leading-relaxed truncate">{claim.claim}</h4>
                             </div>
-                            <span className={`font-label text-[9px] uppercase font-bold px-3 py-1 border rounded-full whitespace-nowrap flex items-center gap-1 ${isTrue ? 'text-[#00ff88] border-[#00ff88]' : isFalse ? 'text-error border-error' : 'text-primary border-primary'}`}>
-                              <span className="material-symbols-outlined text-xs">{isTrue ? 'check_circle' : isFalse ? 'cancel' : 'warning'}</span>
-                              {claim.status.toUpperCase()}
+                            <span className={`font-label text-[9px] uppercase font-bold px-3 py-1 border rounded-full whitespace-nowrap flex items-center gap-1 ${badgeTextClasses}`}>
+                              <span className="material-symbols-outlined text-xs">{badgeIcon}</span>
+                              {claim.status === "VERIFIED" ? "True" : claim.status === "DEBUNKED" ? "False" : claim.status === "MISLEADING" ? "Misleading" : "Unverifiable"}
                             </span>
                           </div>
                           <div className="border-t border-outline-variant/20 pt-4 space-y-3">
@@ -919,33 +1229,27 @@ export default function Home() {
                               <span className="material-symbols-outlined text-xs">psychology</span> AI Reasoning
                             </div>
                             <p className="text-on-surface-variant text-xs leading-relaxed border-l-2 border-primary/30 pl-4">{claim.reasoning}</p>
-                            {claim.correctedStatement && (
-                              <div className="flex gap-2 items-start bg-surface-container p-3 border-l-2 border-[#00ff88]/60 rounded-xl">
-                                <span className="material-symbols-outlined text-[#00ff88] text-sm shrink-0 mt-0.5">lightbulb</span>
-                                <div>
-                                  <span className="font-label text-[9px] uppercase tracking-widest text-[#00ff88] block mb-1">Correct Statement</span>
-                                  <p className="text-on-surface text-xs leading-relaxed font-medium">{claim.correctedStatement}</p>
+                            {/* Conditionally hide Sources if medialAnalysis indicates an uploaded file */}
+                            {!mediaAnalysis && (
+                              <div className="space-y-2 pt-1">
+                                <span className="font-label text-[9px] uppercase tracking-widest text-outline block">Sources</span>
+                                <div className="flex flex-wrap gap-2">
+                                  {(claim.evidence?.results || []).map((ev, i) => {
+                                    const domain = (() => { try { return new URL(ev.url).hostname.replace(/^www\./, ''); } catch { return 'source'; } })();
+                                    const isWiki = domain.includes('wikipedia');
+                                    const isNews = !isWiki;
+                                    return (
+                                      <a key={i} href={ev.url} target="_blank" rel="noreferrer"
+                                        title={ev.title}
+                                        className="flex items-center gap-1.5 px-2 py-1 border border-primary/30 bg-primary/5 text-primary hover:border-primary text-[9px] font-label uppercase tracking-wide hover:brightness-125 transition-all max-w-[220px] rounded-lg">
+                                        <span className="material-symbols-outlined text-[10px] shrink-0">{isNews ? 'newspaper' : 'menu_book'}</span>
+                                        <span className="truncate">{domain}</span>
+                                      </a>
+                                    );
+                                  })}
                                 </div>
                               </div>
                             )}
-                            <div className="space-y-2 pt-1">
-                              <span className="font-label text-[9px] uppercase tracking-widest text-outline block">Sources</span>
-                              <div className="flex flex-wrap gap-2">
-                                {(claim.evidence?.results || []).map((ev, i) => {
-                                  const domain = (() => { try { return new URL(ev.url).hostname.replace(/^www\./, ''); } catch { return 'source'; } })();
-                                  const isWiki = domain.includes('wikipedia');
-                                  const isNews = !isWiki;
-                                  return (
-                                    <a key={i} href={ev.url} target="_blank" rel="noreferrer"
-                                      title={ev.title}
-                                      className="flex items-center gap-1.5 px-2 py-1 border border-primary/30 bg-primary/5 text-primary hover:border-primary text-[9px] font-label uppercase tracking-wide hover:brightness-125 transition-all max-w-[220px] rounded-lg">
-                                      <span className="material-symbols-outlined text-[10px] shrink-0">{isNews ? 'newspaper' : 'menu_book'}</span>
-                                      <span className="truncate">{domain}</span>
-                                    </a>
-                                  );
-                                })}
-                              </div>
-                            </div>
                           </div>
                         </div>
                       );
@@ -995,7 +1299,7 @@ export default function Home() {
                 )}
 
                 {/* YouTube Evidence Link */}
-                {reportData.youtubeUrl && (
+                {!mediaAnalysis && reportData.youtubeUrl && (
                   <div className="space-y-4 pt-4">
                     <div className="flex items-center gap-3">
                       <span className="material-symbols-outlined text-red-500/50 text-xl">video_library</span>
@@ -1044,7 +1348,7 @@ export default function Home() {
                 )}
 
                 {/* All Sources / Bibliography */}
-                {reportData.verifiedClaims && reportData.verifiedClaims.length > 0 && (() => {
+                {!mediaAnalysis && reportData.verifiedClaims && reportData.verifiedClaims.length > 0 && (() => {
                   const allSources = reportData.verifiedClaims.flatMap(c => c.evidence?.results || []);
                   const uniqueSources = Array.from(new Map(allSources.map(s => [s.url, s])).values());
                   
@@ -1143,15 +1447,32 @@ export default function Home() {
         {/* ── REGISTRY VIEW (ARCHIVE) ─────────────── */}
         {currentView === 'registry' && (
           <section className="space-y-8 pb-32">
-            <div className="border-l-4 border-primary pl-8 flex items-end justify-between">
+            <div className="border-l-4 border-primary pl-8 flex flex-col md:flex-row items-start md:items-end justify-between gap-4">
               <div>
                 <span className="font-label text-[10px] uppercase tracking-[0.2em] text-outline block mb-2">Axiom Pipeline — Registry</span>
                 <h2 className="font-headline text-4xl font-black uppercase tracking-tighter text-on-surface">Verification Ledger</h2>
               </div>
-              <button onClick={() => { localStorage.removeItem(isLoggedIn ? 'factcheck_history' : 'factcheck_history_guest'); setHistory([]); }}
-                className="text-[9px] font-label uppercase text-error tracking-widest border border-error/30 px-4 py-2 hover:bg-error/10 transition-all">
-                Purge Logs
-              </button>
+              <div className="flex items-center gap-3 w-full md:w-auto">
+                <div className="relative flex-1 md:w-64">
+                  <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-outline text-sm">search</span>
+                  <input 
+                    type="text" 
+                    placeholder="Search logs..." 
+                    value={historySearch}
+                    onChange={(e) => setHistorySearch(e.target.value)}
+                    className="w-full bg-surface-container-high border border-outline-variant/30 rounded-full pl-10 pr-4 py-2 text-[10px] font-label uppercase tracking-widest focus:outline-none focus:border-primary/50 transition-all"
+                  />
+                  {historySearch && (
+                    <button onClick={() => setHistorySearch("")} className="absolute right-3 top-1/2 -translate-y-1/2 text-outline hover:text-on-surface">
+                      <span className="material-symbols-outlined text-xs">close</span>
+                    </button>
+                  )}
+                </div>
+                <button onClick={() => { localStorage.removeItem(isLoggedIn ? 'factcheck_history' : 'factcheck_history_guest'); setHistory([]); }}
+                  className="text-[9px] font-label uppercase text-error tracking-widest border border-error/30 px-4 py-2 rounded-full hover:bg-error/10 transition-all flex-shrink-0">
+                  Purge Logs
+                </button>
+              </div>
             </div>
 
             <div className="bg-surface-container-low border border-outline-variant/20 overflow-hidden rounded-2xl border-l-4 border-primary shadow-[inset_6px_0_15px_-6px_rgba(183,196,255,0.5)]">
@@ -1167,35 +1488,54 @@ export default function Home() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-outline-variant/10 font-body text-xs">
-                    {history.map((item, idx) => (
-                      <tr key={idx} className="hover:bg-surface-container transition-colors">
-                        <td className="px-6 py-4 text-outline font-mono text-[10px]">{item.timestamp}</td>
-                        <td className="px-6 py-4 text-on-surface max-w-xs font-medium">{item.claim}</td>
-                        <td className="px-6 py-4">
-                          <div className="flex items-center gap-3">
-                            <div className="w-20 h-[2px] bg-surface-variant">
-                              <div className="h-full bg-primary" style={{ width: `${item.score}%` }}/>
+                    {history
+                      .filter(item => 
+                        !historySearch || 
+                        item.claim.toLowerCase().includes(historySearch.toLowerCase()) || 
+                        item.outcome.toLowerCase().includes(historySearch.toLowerCase())
+                      )
+                      .map((item, idx) => (
+                        <tr key={idx} className="hover:bg-surface-container transition-colors">
+                          <td className="px-6 py-4 text-outline font-mono text-[10px]">{item.timestamp}</td>
+                          <td className="px-6 py-4 text-on-surface max-w-xs font-medium">{item.claim}</td>
+                          <td className="px-6 py-4">
+                            <div className="flex items-center gap-3">
+                              <div className="w-20 h-[2px] bg-surface-variant">
+                                <div className="h-full bg-primary" style={{ width: `${item.score}%` }}/>
+                              </div>
+                              <span className={`font-bold text-[10px] ${item.score < 40 ? 'text-error' : 'text-primary'}`}>{item.score}%</span>
                             </div>
-                            <span className={`font-bold text-[10px] ${item.score < 40 ? 'text-error' : 'text-primary'}`}>{item.score}%</span>
-                          </div>
-                        </td>
-                        <td className="px-6 py-4">
-                          <span className={`px-2 py-0.5 border text-[9px] font-bold uppercase ${
-                            item.score > 75 ? 'text-[#00ff88] border-[#00ff88] bg-[#00ff88]/5' :
-                            item.score > 40 ? 'text-primary border-primary/40 bg-primary/5' :
-                            'text-error border-error/40 bg-error/5'
-                          }`}>{item.outcome}</span>
-                        </td>
-                        <td className="px-6 py-4">
-                          <button onClick={() => handleAnalyze(undefined, item.claim.replace('...', ''))}
-                            className="flex items-center gap-1 text-[9px] text-outline hover:text-primary transition-colors font-label uppercase tracking-wider">
-                            <span className="material-symbols-outlined text-xs">replay</span> Rerun
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
+                          </td>
+                          <td className="px-6 py-4">
+                            <span className={`px-2 py-0.5 border text-[9px] font-bold uppercase ${
+                              item.score > 75 ? 'text-[#00ff88] border-[#00ff88] bg-[#00ff88]/5' :
+                              item.score > 40 ? 'text-primary border-primary/40 bg-primary/5' :
+                              'text-error border-error/40 bg-error/5'
+                            }`}>{item.outcome}</span>
+                          </td>
+                          <td className="px-6 py-4">
+                            <div className="flex items-center gap-3">
+                              <button onClick={() => handleAnalyze(undefined, item.claim.replace('...', ''))}
+                                className="flex items-center gap-1 text-[9px] text-outline hover:text-primary transition-colors font-label uppercase tracking-wider">
+                                <span className="material-symbols-outlined text-xs">replay</span> Rerun
+                              </button>
+                              <button onClick={() => deleteHistoryItem(item.claim)}
+                                className="flex items-center gap-1 text-[9px] text-outline hover:text-error transition-colors font-label uppercase tracking-wider">
+                                <span className="material-symbols-outlined text-xs">delete</span>
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
                     {history.length === 0 && (
                       <tr><td colSpan={5} className="px-6 py-16 text-center text-outline text-[11px] uppercase tracking-widest">No entries in ledger. Run an analysis stream first.</td></tr>
+                    )}
+                    {history.length > 0 && history.filter(item => 
+                      !historySearch || 
+                      item.claim.toLowerCase().includes(historySearch.toLowerCase()) || 
+                      item.outcome.toLowerCase().includes(historySearch.toLowerCase())
+                    ).length === 0 && (
+                      <tr><td colSpan={5} className="px-6 py-16 text-center text-outline text-[11px] uppercase tracking-widest">No matching logs found for "{historySearch}".</td></tr>
                     )}
                   </tbody>
                 </table>
@@ -1417,29 +1757,61 @@ export default function Home() {
             </div>
 
             {/* ── AXIOM INTELLIGENCE (CACHE MONITOR) ── */}
-            <div className="bg-surface-container-low border border-outline-variant/30 p-8 space-y-8 shadow-panel rounded-2xl">
-              <div className="flex items-center justify-between">
+            <div className="bg-surface-container-low p-8 space-y-8 shadow-panel rounded-2xl">
+              <div className="flex flex-col md:flex-row gap-4 items-start md:items-center justify-between">
                 <div className="flex items-center gap-3">
                   <div className="w-10 h-10 bg-primary/10 flex items-center justify-center border border-primary/20">
                     <span className="material-symbols-outlined text-primary text-xl">psychology</span>
                   </div>
                   <div>
                     <h3 className="font-headline font-bold uppercase tracking-widest text-xs text-on-surface">Axiom Intelligence</h3>
-                    <p className="text-outline text-[10px] uppercase tracking-wider">Top 5 Instant-Response Latency Profiles</p>
+                    <p className="text-outline text-[10px] uppercase tracking-wider">Recent Local History</p>
                   </div>
                 </div>
-                <span className="text-[9px] font-black uppercase tracking-widest px-3 py-1 border text-primary border-primary/40 bg-primary/5">
-                  LRU ACTIVE
-                </span>
+                
+                <div className="flex items-center gap-3 w-full md:w-auto">
+                  <div className="relative w-full md:w-64">
+                    <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-outline text-sm">search</span>
+                    <input 
+                      type="text" 
+                      placeholder="Search history..." 
+                      value={historySearch}
+                      onChange={(e) => setHistorySearch(e.target.value)}
+                      className="w-full bg-surface-container border border-outline-variant/30 text-on-surface text-xs focus:border-primary/50 focus:ring-1 focus:ring-primary/50 outline-none px-9 py-2 rounded-lg transition-all"
+                    />
+                    {historySearch && (
+                      <button onClick={() => setHistorySearch("")} className="absolute right-3 top-1/2 -translate-y-1/2 text-outline hover:text-on-surface">
+                        <span className="material-symbols-outlined text-xs">close</span>
+                      </button>
+                    )}
+                  </div>
+                  <span className="text-[9px] font-black uppercase tracking-widest px-3 py-1.5 border text-primary border-primary/40 bg-primary/5 whitespace-nowrap hidden sm:inline-block">
+                    LRU ACTIVE
+                  </span>
+                </div>
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                {cachedReports.map((entry, idx) => (
+                {cachedReports
+                  .filter(entry => 
+                    entry?.query?.toLowerCase()?.includes(historySearch.toLowerCase()) || 
+                    (entry?.report?.verifiedClaims && entry.report.verifiedClaims.some(c => c?.claim?.toLowerCase()?.includes(historySearch.toLowerCase())))
+                  )
+                  .map((entry, idx) => (
                   <div key={idx} className="bg-surface-container border border-outline-variant/20 p-6 flex flex-col justify-between group hover:border-primary/40 transition-all rounded-2xl">
                     <div className="space-y-4">
                       <div className="flex justify-between items-start">
                         <span className="text-[9px] font-mono text-outline uppercase tracking-tighter">Report ID :: {entry.report.totalClaims}C-{Math.floor(entry.report.overallTrustScore)}</span>
-                        <div className="w-2 h-2 bg-[#00ff88] rounded-full shadow-[0_0_8px_#00ff88]"></div>
+                        <div className="flex items-center gap-2">
+                          <button 
+                            onClick={(e) => { e.stopPropagation(); deleteHistoryItem(entry.query); }}
+                            className="text-outline hover:text-error transition-all"
+                            title="Delete this report"
+                          >
+                            <span className="material-symbols-outlined text-xs">delete</span>
+                          </button>
+                          <div className="w-2 h-2 bg-[#00ff88] rounded-full shadow-[0_0_8px_#00ff88]"></div>
+                        </div>
                       </div>
                       <p className="text-xs font-medium text-on-surface leading-normal line-clamp-3 italic">"{entry.query}"</p>
                       
@@ -1468,6 +1840,11 @@ export default function Home() {
                     Intelligence memory empty. Perform searches to populate cache.
                   </div>
                 )}
+                {cachedReports.length > 0 && cachedReports.filter(entry => entry?.query?.toLowerCase()?.includes(historySearch.toLowerCase()) || (entry?.report?.verifiedClaims && entry.report.verifiedClaims.some(c => c?.claim?.toLowerCase()?.includes(historySearch.toLowerCase())))).length === 0 && (
+                  <div className="col-span-full py-12 text-center border border-dashed border-outline-variant/30 text-outline text-[11px] uppercase tracking-widest">
+                    No matching history found for "{historySearch}".
+                  </div>
+                )}
               </div>
             </div>
 
@@ -1479,7 +1856,7 @@ export default function Home() {
                 { icon: 'storage', label: 'Local History Ledger', status: 'ACTIVE', sub: 'Browser LocalStorage · Encrypted', ok: true },
                 { icon: 'key', label: 'API Authentication', status: 'CONFIGURED', sub: 'GEMINI_API_KEY loaded from .env.local', ok: true },
               ].map(card => (
-                <div key={card.label} className={`bg-surface-container-low p-6 border rounded-2xl ${card.ok ? 'border-primary/20' : 'border-error/30'}`}>
+                <div key={card.label} className={`bg-surface-container-low p-6 rounded-2xl`}>
                   <div className="flex items-center justify-between mb-4">
                     <div className="flex items-center gap-3">
                       <div className="w-10 h-10 bg-surface-container flex items-center justify-center border border-outline-variant/20 rounded-xl">

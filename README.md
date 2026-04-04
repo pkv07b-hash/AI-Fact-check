@@ -1,48 +1,56 @@
-# AI Fact-Checking Engine
+# AXIOM.AI — Forensic Truth Verification
 
-An AI-driven fact-checking engine that extracts verifiable claims from text or URLs, autonomously searches the web for evidence using DuckDuckGo, and verifies the claims utilizing Google Gemini 1.5.
+A high-performance, resilient AI fact-checking engine designed for deep forensic analysis of text, URLs, and **PDF Documents**. Axiom identifies verifiable claims and cross-references them against real-time web evidence using a tiered API fallback system.
 
-## Architecture & Tech Stack
+## 🚀 Key Features
 
-- **Frontend & Backend**: Next.js (App Router), React, TypeScript
-- **Styling**: Vanilla CSS (Premium, Glassmorphism Aesthetics)
-- **AI Orchestration**: LangChain, initialized heavily across pipelines.
-- **LLM**: Google Gemini (`@langchain/google-genai`)
-- **Web Search API**: DuckDuckGo (`duck-duck-scrape`)
-- **Schema Validation**: Zod
+- **Multimodal Forensics**: Scan Text, News Links, and **Native PDF Documents**.
+- **3-Tier API Fallback**: Resilient pipeline that cascades between **Google Gemini 2.5 Flash**, **Groq (Llama 3.3)**, and **OpenAI (GPT-4o-mini)**.
+- **Strict Verification Rules**: Enforces 6 forensic rules prioritizing **Relevance over Popularity** and requiring multiple reputable sources.
+- **Deep Research Mode**: Uses **Tavily AI** for advanced, real-time web scraping and evidence gathering.
+- **History Search & Ledger**: Real-time searchable history of all local fact-checks.
+- **Report Export**: Download professional, standalone HTML verification reports with clickable links.
 
-## Getting Started
+## 🛠 Architecture & Tech Stack
 
-1. **Install Dependencies**
-   ```bash
-   npm install
-   ```
+- **Framework**: Next.js 16 (App Router), React 19, TypeScript
+- **Styling**: Vanilla CSS (Premium Glassmorphism & Neon Aesthetics)
+- **AI Orchestration**: LangChain Multi-Provider System
+- **Intelligence**: 
+  - **Primary**: Google Gemini 2.5 Flash
+  - **Secondary**: Groq (Llama 3.3)
+  - **Tertiary**: OpenAI (GPT-4o-mini)
+- **Search Engine**: Tavily AI + DuckDuckScrape + Cheerio
+- **Validation**: Zod (Type-safe forensic schemas)
 
-2. **Configure Environment Variables**
-   Rename or create a `.env.local` file in the root directory and add your Google Gemini API key (primary). Optionally add a Groq key so the pipeline can fall back if Gemini fails or hits limits:
-   ```env
-   GEMINI_API_KEY=your_actual_key_here
-   GROQ_API_KEY=your_groq_key_optional
+## 🏁 Getting Started
 
-   # Optional (defaults shown):
-   # GEMINI_MODEL=gemini-2.5-flash
-   # GROQ_MODEL=openai/gpt-oss-120b
-   # PRIMARY_LLM=groq
-   ```
-   Get a Groq API key at [https://console.groq.com](https://console.groq.com).
+### 1. Install Dependencies
+```bash
+npm install
+```
 
-   If Gemini returns **429 / quota exceeded**, set **`PRIMARY_LLM=groq`** so the app tries Groq first and skips the slow failing Gemini attempts. After extraction uses Groq, verification also prefers Groq automatically unless you set **`PRIMARY_LLM=gemini`**.
+### 2. Configure Environment Variables
+Create a `.env.local` file in the root directory and add your API keys:
+```env
+# Required for primary verification
+GEMINI_API_KEY=your_gemini_key
 
-3. **Run the Development Server**
-   ```bash
-   npm run dev
-   ```
+# Required for 3-tier fallback & high-speed extraction
+GROQ_API_KEY=your_groq_key
+OPENAI_API_KEY=your_openai_key
 
-4. **Open the Application**
-   Navigate to [http://localhost:3000](http://localhost:3000)
+# Required for deep web research
+TAVILY_API_KEY=your_tavily_key
+```
 
-## How It Works
+### 3. Run Development Server
+```bash
+npm run dev
+```
 
-1. **Claim Extraction**: The `extractor.ts` module parses the input and uses Gemini alongside a LangChain structured output parser to strictly identify individual, verifiable claims.
-2. **Evidence Retrieval**: The `search.ts` module uses `duck-duck-scrape` to scrape search results related to each identified claim.
-3. **Verification**: The `verifier.ts` module evaluates the initial claim against the retrieved search evidence, providing a True/False/Partially True verdict, a Confidence Score, and concise reasoning.
+## 🧠 How It Works
+
+1. **Smart Extraction**: The `extractor.ts` module uses Gemini 2.5 Flash (or Groq) to split inputs into distinct, verifiable claims while preserving original user context.
+2. **Multi-Source Retrieval**: Use **Tavily** and **DuckDuckGo** to gather high-fidelity evidence directly related to the extracted subjects.
+3. **Forensic Verification**: `verifier.ts` evaluates the claims against evidence shards using strict relevance filters, resulting in a **True**, **False**, **Misleading**, or **Unverifiable** verdict.

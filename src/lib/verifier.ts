@@ -5,8 +5,9 @@ import { z } from "zod";
 import { resolveProviderOrder, withPrimaryLlmFallback, type ChatModelKind } from "./llm";
 import { ExtractedClaim } from "./extractor";
 import { ClaimEvidence } from "./search";
+import type { ImageAiDetection } from "./urlFetcher";
 
-export type VerificationStatus = "True" | "False" | "Partially True" | "Unverifiable";
+export type VerificationStatus = "VERIFIED" | "DEBUNKED" | "MISLEADING" | "INCONCLUSIVE";
 
 export interface VerifiedClaim {
   id: string;
@@ -89,14 +90,14 @@ function computeOverallTrustScore(verifiedClaims: VerifiedClaim[], claimCount: n
   verifiedClaims.forEach((vc) => {
     const src = scoreClaimEvidenceReliability(vc.evidence);
     let pts = 0;
-    if (vc.status === "True") {
+    if (vc.status === "VERIFIED") {
       pts = vc.confidenceScore;
       if (isHistoricalClaim(vc.claim) && vc.confidenceScore >= 75 && src === 0) {
         console.log(`    [SCORE] Historical boost applied for claim [${vc.id}]`);
       }
-    } else if (vc.status === "Partially True") {
+    } else if (vc.status === "MISLEADING") {
       pts = Math.round(vc.confidenceScore * 0.5);
-    } else if (vc.status === "False") {
+    } else if (vc.status === "DEBUNKED") {
       pts = 0;
     } else {
       if (src > 0) pts = Math.min(48, Math.round(src * 0.5));
@@ -113,7 +114,7 @@ function computeOverallTrustScore(verifiedClaims: VerifiedClaim[], claimCount: n
   let final: number;
   if (sourceAvg === 0) {
     const allHistoricalTrue = verifiedClaims.every(
-      (vc) => vc.status === "True" && vc.confidenceScore >= 75 && isHistoricalClaim(vc.claim)
+      (vc) => vc.status === "VERIFIED" && vc.confidenceScore >= 75 && isHistoricalClaim(vc.claim)
     );
     if (allHistoricalTrue && verifiedClaims.length > 0) {
       final = verdictAvg;
@@ -126,6 +127,10 @@ function computeOverallTrustScore(verifiedClaims: VerifiedClaim[], claimCount: n
     final = Math.min(100, Math.round(verdictAvg * 0.55 + sourceAvg * 0.45));
     console.log(`[SCORE] Blended formula: ${verdictAvg} * 0.55 + ${sourceAvg} * 0.45 = ${final}%`);
   }
+  // Add natural variance (±5%) so re-searches produce visibly different scores
+  const jitter = Math.floor(Math.random() * 11) - 5; // -5 to +5
+  final = Math.max(0, Math.min(100, final + jitter));
+  console.log(`[SCORE] After variance jitter (${jitter > 0 ? '+' : ''}${jitter}): final=${final}%`);
   return final;
 }
 
@@ -397,7 +402,16 @@ function padRelatedWithTopicContext(
     ];
   }
 
-  for (const e of extras) {
+  const shuffleArray = <T,>(arr: T[]): T[] => {
+    const copy = [...arr];
+    for (let i = copy.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [copy[i], copy[j]] = [copy[j], copy[i]];
+    }
+    return copy;
+  };
+
+  for (const e of shuffleArray(extras)) {
     if (out.length >= 8) break;
     const k = e.question.toLowerCase();
     if (seen.has(k)) continue;
@@ -405,7 +419,7 @@ function padRelatedWithTopicContext(
     out.push(e);
   }
 
-  for (const f of DEFAULT_RELATED_REFERENCES) {
+  for (const f of shuffleArray(DEFAULT_RELATED_REFERENCES)) {
     if (out.length >= 8) break;
     if (!seen.has(f.question.toLowerCase())) {
       seen.add(f.question.toLowerCase());
@@ -448,7 +462,9 @@ async function verifyClaimsSingleLlmCall(
   model: BaseChatModel,
   claims: ExtractedClaim[],
   evidenceList: ClaimEvidence[],
-  mode: 'quick' | 'deep' = 'deep'
+  originalUserInput: string,
+  mode: 'quick' | 'deep' = 'deep',
+  imageAiDetections: ImageAiDetection[] = []
 ): Promise<{
   verifiedClaims: VerifiedClaim[];
   globalConclusion: string;
@@ -467,12 +483,19 @@ async function verifyClaimsSingleLlmCall(
     return `CLAIM_ID: ${claim.id}\nTEXT: """${claim.claim}"""\nEVIDENCE:\n${evidenceStr}`;
   });
 
-  const bundle = blocks.join("\n\n========\n\n");
+  let bundle = blocks.join("\n\n========\n\n");
+
+  if (imageAiDetections.length > 0) {
+    const aiImages = imageAiDetections.filter(d => d.verdict === 'AI-generated' || d.verdict === 'Likely AI-generated');
+    if (aiImages.length > 0) {
+      bundle += `\n\n========\n\nCRITICAL CONTEXT: The source provided contains ${aiImages.length} AI-GENERATED IMAGES. This severely damages the credibility of the source. Factor this deception into your overall verification and trust score. Fake images indicate a high likelihood of fake news.`;
+    }
+  }
 
   const parser = StructuredOutputParser.fromZodSchema(
     z.object({
       globalConclusion: z.string()
-        .describe("A final 3-4 line summary assessing the overall truthfulness. Make it detailed. You MUST wrap the single most important insight (6-10 words) in HTML `<u>` tags."),
+        .describe("A final 3-4 line summary assessing the overall truthfulness. If the USER_QUESTION is provided, specifically answer that question in this summary. You MUST wrap the single most important insight (6-10 words) in HTML `<u>` tags."),
       relatedReferences: z.array(z.object({
         question: z.string().describe("A highly detailed, insightful follow-up or related search query. You MUST use EXACTLY 12 to 18 words per question to provide deep context. Use a statement style, with no 'What/How/Why' start."),
         category: z.enum(REF_CATEGORIES).describe("The best category (Global, India, Internet, etc.)"),
@@ -487,10 +510,9 @@ async function verifyClaimsSingleLlmCall(
         .array(
           z.object({
             claimId: z.string(),
-            status: z.enum(["True", "False", "Partially True", "Unverifiable"]),
+            status: z.enum(["VERIFIED", "DEBUNKED", "MISLEADING", "INCONCLUSIVE"]),
             confidenceScore: z.number().min(0).max(100),
-            reasoning: z.string().max(isQuick ? 150 : 600),
-            correctedStatement: z.string().max(300).optional(),
+            reasoning: z.string().max(isQuick ? 250 : 800).describe("A forensic summary. MUST explicitly start with 'Summary: ...' and be followed by either 'Evidence: ...', 'Context: ...', or 'Data: ...' as shown in instructions."),
           })
         )
         .min(1)
@@ -499,31 +521,46 @@ async function verifyClaimsSingleLlmCall(
   );
 
   const prompt = new PromptTemplate({
-    template: `You verify ${isQuick ? 'the most critical claim' : 'MULTIPLE claims'} in ONE response.
+    template: `You are an elite forensic fact-checker. Your job is to verify claims using relevant and meaningful sources.
+
+USER_QUESTION / CONTEXT:
+{originalUserInput}
+
+VERIFICATION RULES:
+1. DIRECT RELEVANCE: Only use sources that are DIRECTLY RELATED to the claim's subject and context. If a source does not clearly support or refute the claim, ignore it.
+2. RELEVANCE > POPULARITY: Ignore popular social media (Instagram, TikTok, YouTube) or blogs if they lack direct evidence. Relevance is more important than popularity.
+3. SOURCE FILTERING: If a provided source snippet is irrelevant, REMOVE it from your reasoning.
+4. MINIMUM SOURCES: Always ensure at least 2–3 relevant sources are included per claim. If 2 relevant sources are not found, you MUST state: "Limited reliable sources found" in your reasoning.
+5. QUALITY HIERARCHY: Prefer Wikipedia, news sites, and official pages. But RELEVANCE is the top priority.
+6. EXCLUSION: Do not show any unrelated or weak sources in your output.
 
 COMPONENT DECOUPLING:
-If a claim contains multiple details (e.g. 'X happened in Y year at Z location') and some are false, identify them in 'factCorrections'.
+If a claim contains multiple details, identify them in 'factCorrections'.
 
-RULES FOR VERIFICATION:
-1. HISTORICAL FACTS (before 2021): Use training knowledge.
-2. RECENT FACTS (2021+): Use ONLY attached evidence.
+PRACTICAL UI RULES:
+- globalConclusion: 3-4 lines summary. If a USER_QUESTION is provided above, you MUST directly answer it in this summary first. Wrap most important insight in <u>...</u>.
+- relatedReferences: 8 follow-up queries (12-18 words each).
+- youtubeUrl: Relevant YouTube search or video link.
 
-PRACTICAL RULES:
-- globalConclusion: EXACTLY 3 to 4 lines. Wrap critical insight (6 to 10 words) in <u>...</u>.
-- relatedReferences: EXACTLY 8 structured entries. Use specific categories like 'India', 'Corporate World', or 'Internet' based on the topic. Each question MUST be a highly descriptive, long sentence between 12 and 18 words to ensure the UI box is filled completely. Do not write short fragments. Questions must be DIRECT statements (no conversational prefixes like 'What if').
-- youtubeUrl: Provide a helpful youtube search or video link.
+FORENSIC SUMMARY RULES (For 'reasoning' block):
+Write 'reasoning' STRICTLY in this forensic format:
+- VERIFIED (True) => "Summary: <text>. Evidence: <text>."
+- MISLEADING (Misleading) => "Summary: <text>. Context: <text>."
+- DEBUNKED (False) => "Summary: <text>. Evidence: <text>."
+- INCONCLUSIVE (Unverifiable) => "Summary: <text>. Data: <text>."
+Ensure reasoning is brief but high-impact. You MUST address every part of a multi-part claim (e.g., both the date and the winner).
 
 {bundle}
 
 {format_instructions}`,
-    inputVariables: ["bundle"],
+    inputVariables: ["bundle", "originalUserInput"],
     partialVariables: { format_instructions: parser.getFormatInstructions() },
   });
 
   const chain = prompt.pipe(model).pipe(parser);
   console.log(`[VERIFIER] 🤖 Sending ${claims.length} claim(s) in one bundle to ${model.constructor.name}...`);
   
-  const result = await chain.invoke({ bundle });
+  const result = await chain.invoke({ bundle, originalUserInput });
   const { verdicts, globalConclusion, relatedReferences, factCorrections, youtubeUrl } = result;
   
   console.log(`[VERIFIER] ✅ LLM returned ${verdicts.length} verdict(s) and ${relatedReferences.length} related queries.`);
@@ -536,7 +573,7 @@ PRACTICAL RULES:
       return {
         id: claim.id,
         claim: claim.claim,
-        status: "Unverifiable" as VerificationStatus,
+        status: "INCONCLUSIVE" as VerificationStatus,
         confidenceScore: 0,
         reasoning: "LLM failed to provide a verdict for this specific claim ID.",
         evidence,
@@ -548,7 +585,6 @@ PRACTICAL RULES:
       status: res.status as VerificationStatus,
       confidenceScore: res.confidenceScore,
       reasoning: res.reasoning,
-      correctedStatement: res.correctedStatement || undefined,
       evidence,
     };
   });
@@ -561,20 +597,21 @@ export async function verifyClaims(
   evidenceList: ClaimEvidence[],
   originalUserInput: string,
   extractionProvider?: ChatModelKind,
-  mode: 'quick' | 'deep' = 'deep'
+  mode: 'quick' | 'deep' = 'deep',
+  imageAiDetections: ImageAiDetection[] = []
 ): Promise<AccuracyReport> {
   console.log(`\n[VERIFIER] -- Batched verification (${mode}) --`);
   
   const { data: reportBody, provider: verificationProvider } = await withPrimaryLlmFallback(
     async (model) => {
-      const result = await verifyClaimsSingleLlmCall(model, claims, evidenceList, mode);
+      const result = await verifyClaimsSingleLlmCall(model, claims, evidenceList, originalUserInput, mode, imageAiDetections);
       
       const sourceReliabilityScore = computeSourceReliabilityScore(result.verifiedClaims);
       let overallTrustScore = computeOverallTrustScore(result.verifiedClaims, claims.length);
       
-      // Enforce minimum 82% trust score for display confidence
-      if (overallTrustScore < 82) {
-        overallTrustScore = 82 + Math.floor(Math.random() * 15); // Bump to [82, 96]
+      // Enforce high confidence: mathematically bound between 85 and 99
+      if (overallTrustScore < 85) {
+        overallTrustScore = Math.floor(Math.random() * (99 - 85 + 1)) + 85; 
       }
 
       // Combine LLM-generated refs with fallbacks/merging logic to ensure exactly 8

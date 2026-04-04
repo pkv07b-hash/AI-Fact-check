@@ -75,6 +75,10 @@ export async function POST(request: Request) {
         hasManipulationSignals: mediaResult.hasManipulationSignals,
         manipulationDetails: mediaResult.manipulationDetails,
         detections: mediaResult.detections,
+        isAiGenerated: mediaResult.isAiGenerated,
+        aiGeneratedConfidence: mediaResult.aiGeneratedConfidence,
+        aiGeneratedAnalysis: mediaResult.aiGeneratedAnalysis,
+        syntheticType: mediaResult.syntheticType,
       },
     });
   } catch (error) {
