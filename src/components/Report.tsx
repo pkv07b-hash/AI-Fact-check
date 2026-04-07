@@ -10,9 +10,9 @@ interface ReportProps {
 
 function StatusBadge({ status }: { status: string }) {
   let colorClass = "status-unverifiable-badge";
-  if (status === "True") colorClass = "status-true-badge";
-  if (status === "False") colorClass = "status-false-badge";
-  if (status === "Partially True") colorClass = "status-partial-badge";
+  if (status === "VERIFIED") colorClass = "status-true-badge";
+  if (status === "DEBUNKED") colorClass = "status-false-badge";
+  if (status === "MISLEADING") colorClass = "status-partial-badge";
 
   return <span className={`status-badge ${colorClass}`}>{status}</span>;
 }
@@ -79,9 +79,9 @@ export default function Report({ report }: ReportProps) {
           <h3>Accuracy Report</h3>
           <p>Verified <strong className="highlight">{report.totalClaims}</strong> individual claims across the source.</p>
           <div className="stat-summary">
-            <div className="stat-item"><span className="dot dot-green"></span> {report.verifiedClaims.filter(c => c.status === "True").length} True</div>
-            <div className="stat-item"><span className="dot dot-yellow"></span> {report.verifiedClaims.filter(c => c.status === "Partially True").length} Partial</div>
-            <div className="stat-item"><span className="dot dot-red"></span> {report.verifiedClaims.filter(c => c.status === "False").length} False</div>
+            <div className="stat-item"><span className="dot dot-green"></span> {report.verifiedClaims.filter(c => c.status === "VERIFIED").length} Verified</div>
+            <div className="stat-item"><span className="dot dot-yellow"></span> {report.verifiedClaims.filter(c => c.status === "MISLEADING").length} Misleading</div>
+            <div className="stat-item"><span className="dot dot-red"></span> {report.verifiedClaims.filter(c => c.status === "DEBUNKED").length} Debunked</div>
           </div>
         </div>
       </div>
